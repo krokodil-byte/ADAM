@@ -515,13 +515,13 @@ class ADAMTUI:
 
         # Build command
         if cmd == 'init':
-            os.system('vectllm init')
+            os.system('adam init')
         elif cmd == 'chat':
             ckpt = f"-c {self.values['checkpoint']}" if self.values['checkpoint'] else ""
-            os.system(f"vectllm chat {ckpt}")
+            os.system(f"adam chat {ckpt}")
         elif cmd == 'stats':
             ckpt = f"-c {self.values['checkpoint']}" if self.values['checkpoint'] else ""
-            os.system(f"vectllm stats {ckpt}")
+            os.system(f"adam stats {ckpt}")
 
         input("\nPress Enter to continue...")
         stdscr.clear()
@@ -537,7 +537,7 @@ class ADAMTUI:
         curses.endwin()
 
         # Build command
-        cmd = f"vectllm train {self.values['input_file']}"
+        cmd = f"adam train {self.values['input_file']}"
         if self.values['output_file']:
             cmd += f" -o {self.values['output_file']}"
         if self.values['checkpoint']:
@@ -557,7 +557,7 @@ class ADAMTUI:
         curses.endwin()
 
         # Build command
-        cmd = "vectllm wikipedia"
+        cmd = "adam wikipedia"
         if self.values['output_file']:
             cmd += f" -o {self.values['output_file']}"
         if self.values['checkpoint']:
