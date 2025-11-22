@@ -1,10 +1,10 @@
-# A.D.A.M - Adaptive and Dynamic Agent Module
+# ADAM - Adaptive and Dynamic Agent Module
 
 Continuous Self-Training Language Model with Dynamic Vocabulary
 
 ## Overview
 
-A.D.A.M is an experimental language model that features continuous self-training capabilities and dynamic vocabulary expansion. Built with CUDA acceleration support for high-performance training and inference.
+ADAM is an experimental language model that features continuous self-training capabilities and dynamic vocabulary expansion. Built with CUDA acceleration support for high-performance training and inference.
 
 ## Features
 
@@ -22,8 +22,8 @@ A.D.A.M is an experimental language model that features continuous self-training
 ### From Source (Development)
 
 ```bash
-git clone https://github.com/krokodil-byte/A.D.A.M-Adaptive-and-Dynamic-Agent-Module.git
-cd A.D.A.M-Adaptive-and-Dynamic-Agent-Module
+git clone https://github.com/krokodil-byte/ADAM.git
+cd ADAM
 pip install -e .
 ```
 
@@ -148,7 +148,7 @@ vectllm vocab stats -f vocab.json
 vectllm vocab prune -f vocab.json
 ```
 
-### A.D.A.M TUI (Graphical Interface)
+### ADAM TUI (Graphical Interface)
 
 ```bash
 vectllm settings
@@ -230,7 +230,7 @@ Opens a complete text-based graphical interface with menus for all operations:
 ## Project Structure
 
 ```
-A.D.A.M-Adaptive-and-Dynamic-Agent-Module/
+ADAM/
 ├── setup.py                 # Package installation
 ├── run.py                   # Development runner
 ├── pytest.ini               # Test configuration
@@ -302,4 +302,4 @@ Scuglia Samuele
 
 ## Links
 
-- [GitHub Repository](https://github.com/krokodil-byte/A.D.A.M-Adaptive-and-Dynamic-Agent-Module)
+- [GitHub Repository](https://github.com/krokodil-byte/ADAM)
