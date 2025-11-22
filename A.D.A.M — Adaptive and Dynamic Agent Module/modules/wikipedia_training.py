@@ -53,17 +53,20 @@ class WikipediaAPIFetcher:
     def __init__(self,
                  language: str = 'en',
                  ram_percentage: float = 30.0,
+                 batch_size: int = 100,
                  min_article_length: int = 500,
                  max_article_length: int = 50000):
         """
         Args:
             language: Wikipedia language code (en, it, de, etc.)
-            ram_percentage: Target RAM usage percentage for article buffer
+            ram_percentage: Target RAM usage percentage for article buffer (legacy, ignored if batch_size > 0)
+            batch_size: Number of articles per batch (default: 100)
             min_article_length: Minimum article length in chars
             max_article_length: Maximum article length in chars
         """
         self.language = language
         self.ram_percentage = ram_percentage
+        self.batch_size = batch_size
         self.min_length = min_article_length
         self.max_length = max_article_length
         self.base_url = f"https://{language}.wikipedia.org/w/api.php"
@@ -74,7 +77,7 @@ class WikipediaAPIFetcher:
 
         print(f"📡 Wikipedia API Fetcher initialized")
         print(f"   Language: {language}")
-        print(f"   RAM target: {ram_percentage}%")
+        print(f"   Batch size: {batch_size} articles")
 
     def _api_request(self, params: dict) -> dict:
         """Make API request to Wikipedia"""
@@ -139,24 +142,23 @@ class WikipediaAPIFetcher:
 
         return text
 
-    def fetch_batch(self, batch_size: int = 50) -> int:
+    def fetch_batch(self, api_batch_size: int = 10) -> int:
         """
-        Fetch a batch of articles until RAM target is reached.
+        Fetch a batch of articles.
 
         Args:
-            batch_size: Number of titles to fetch per API call
+            api_batch_size: Number of titles to fetch per API call
 
         Returns:
             Number of articles fetched in this batch
         """
         fetched = 0
-        initial_memory = get_memory_usage_percent()
-        target_memory = initial_memory + self.ram_percentage
+        target_articles = self.batch_size
 
-        print(f"\n📥 Fetching articles (RAM: {initial_memory:.1f}% → {target_memory:.1f}%)")
+        print(f"\n📥 Fetching {target_articles} articles...")
 
-        while get_memory_usage_percent() < target_memory:
-            titles = self._get_random_titles(batch_size)
+        while fetched < target_articles:
+            titles = self._get_random_titles(api_batch_size)
 
             if not titles:
                 print("   ⚠️  No titles received, retrying...")
@@ -164,6 +166,9 @@ class WikipediaAPIFetcher:
                 continue
 
             for title in titles:
+                if fetched >= target_articles:
+                    break
+
                 content = self._get_article_content(title)
 
                 if content:
@@ -175,12 +180,7 @@ class WikipediaAPIFetcher:
                         self.total_fetched += 1
 
                         if fetched % 10 == 0:
-                            mem = get_memory_usage_percent()
-                            print(f"   Fetched {fetched} articles (RAM: {mem:.1f}%)")
-
-                # Check RAM after each article
-                if get_memory_usage_percent() >= target_memory:
-                    break
+                            print(f"   Fetched {fetched}/{target_articles} articles")
 
             # Small delay to be nice to Wikipedia API
             time.sleep(0.5)
@@ -451,21 +451,21 @@ class WikipediaStreamTrainer:
     def __init__(self,
                  brain: VectLLMBrain,
                  language: str = 'en',
-                 ram_percentage: float = 30.0,
+                 batch_size: int = 100,
                  stats_collector: Optional[StatsCollector] = None,
                  checkpoint_manager: Optional[CheckpointManager] = None):
         """
         Args:
             brain: Istanza VectLLMBrain
             language: Wikipedia language code
-            ram_percentage: Target RAM usage for article buffer
+            batch_size: Number of articles per batch
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
         """
         self.brain = brain
         self.fetcher = WikipediaAPIFetcher(
             language=language,
-            ram_percentage=ram_percentage
+            batch_size=batch_size
         )
         self.stats = stats_collector or StatsCollector()
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
@@ -496,7 +496,7 @@ class WikipediaStreamTrainer:
         if verbose:
             print("📚 Starting Wikipedia Stream Training")
             print(f"   Language: {self.fetcher.language}")
-            print(f"   RAM target: {self.fetcher.ram_percentage}%")
+            print(f"   Batch size: {self.fetcher.batch_size} articles")
             print(f"   Max articles: {max_articles or 'unlimited'}")
             print(f"   Passes per batch: {passes_per_batch}")
             print()

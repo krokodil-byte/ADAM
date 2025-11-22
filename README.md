@@ -83,11 +83,11 @@ vectllm wikipedia dump.xml -o model.ckpt --max-articles 1000
 #### From Wikipedia API (Streaming)
 
 ```bash
-vectllm wikipedia -o model.ckpt --language en --ram-percent 30
+vectllm wikipedia -o model.ckpt --language en --batch-size 100
 ```
 
-This mode streams articles directly from Wikipedia API with automatic RAM management:
-1. Downloads articles until target RAM % is reached
+This mode streams articles directly from Wikipedia API:
+1. Downloads batch of articles
 2. Trains on the batch
 3. Clears memory
 4. Repeats
@@ -95,9 +95,9 @@ This mode streams articles directly from Wikipedia API with automatic RAM manage
 Options:
 - `--language`: Wikipedia language code (default: `en`)
   - Examples: `en`, `it`, `de`, `fr`, `es`, `ja`, `zh`
-- `--ram-percent`: Target RAM usage % for article buffer (default: `30`)
-  - Lower = more frequent batches, less memory
-  - Higher = larger batches, more memory
+- `--batch-size`: Number of articles per batch (default: `100`)
+  - Lower = faster iterations, less memory
+  - Higher = larger batches, more context per cycle
 - `--max-articles`: Maximum articles to process (default: unlimited)
 - `-p, --passes`: Training passes per batch (default: 1)
 - `-o, --output`: Output checkpoint
@@ -204,7 +204,7 @@ Opens a complete text-based graphical interface with menus for all operations:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `language` | `en` | Wikipedia language code |
-| `ram_percentage` | 30.0 | Target RAM % for article buffer |
+| `batch_size` | 100 | Number of articles per batch |
 | `min_article_length` | 500 | Minimum article length in characters |
 | `max_article_length` | 50000 | Maximum article length in characters |
 | `auto_save_interval` | 100 | Auto-save every N articles |

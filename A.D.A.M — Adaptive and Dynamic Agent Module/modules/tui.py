@@ -38,7 +38,7 @@ class ADAMTUI:
             'passes': 1,
             'preset': 'default',
             'language': 'en',
-            'ram_percent': 30.0,
+            'batch_size': 100,
             'max_articles': 0,
         }
 
@@ -73,7 +73,7 @@ class ADAMTUI:
                 'title': 'Wikipedia Training',
                 'items': [
                     ('language', '🌍 Language', 'Wikipedia language code'),
-                    ('ram', '💾 RAM %', 'Target RAM usage percentage'),
+                    ('batch', '📦 Batch Size', 'Articles per batch'),
                     ('articles', '📝 Max Articles', 'Maximum articles (0=unlimited)'),
                     ('output', '💾 Output Checkpoint', 'Where to save the model'),
                     ('checkpoint', '📦 Load Checkpoint', 'Resume from checkpoint'),
@@ -243,8 +243,8 @@ class ADAMTUI:
             return self.values['preset']
         elif key == 'language':
             return self.values['language']
-        elif key == 'ram':
-            return f"{self.values['ram_percent']}%"
+        elif key == 'batch':
+            return str(self.values['batch_size'])
         elif key == 'articles':
             return str(self.values['max_articles']) if self.values['max_articles'] else "unlimited"
         return ""
@@ -301,11 +301,11 @@ class ADAMTUI:
             value = self._input_dialog(stdscr, "Language Code", self.values['language'])
             if value is not None:
                 self.values['language'] = value
-        elif key == 'ram':
-            value = self._input_dialog(stdscr, "RAM %", str(self.values['ram_percent']))
+        elif key == 'batch':
+            value = self._input_dialog(stdscr, "Batch Size", str(self.values['batch_size']))
             if value is not None:
                 try:
-                    self.values['ram_percent'] = float(value)
+                    self.values['batch_size'] = int(value)
                 except ValueError:
                     self.message = "Invalid number"
                     self.message_type = "error"
@@ -541,7 +541,7 @@ class ADAMTUI:
             cmd += f" -c {self.values['checkpoint']}"
         cmd += f" -p {self.values['passes']}"
         cmd += f" --language {self.values['language']}"
-        cmd += f" --ram-percent {self.values['ram_percent']}"
+        cmd += f" --batch-size {self.values['batch_size']}"
         if self.values['max_articles']:
             cmd += f" --max-articles {self.values['max_articles']}"
         cmd += f" --preset {self.values['preset']}"
