@@ -20,6 +20,7 @@
 #define NUM_LAYERS 6
 #define VENN_CLUSTERS 256
 #define EPISODIC_BUFFER_SIZE 1024
+#define DEFAULT_BLOCK_SIZE 256  // CUDA block size for kernel launches
 
 typedef enum {
     MODE_EXTERNAL_INPUT = 0,
