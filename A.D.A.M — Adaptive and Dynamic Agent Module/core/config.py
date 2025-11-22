@@ -91,9 +91,30 @@ class PerformanceConfig:
 
 
 @dataclass
+class GenerationConfig:
+    """Configurazione generazione testo con continuation bias"""
+
+    # Temperature per sampling
+    TEMPERATURE: float = 1.0
+
+    # Continuation bias - stop quando confidenza scende
+    MIN_TOKEN_CONFIDENCE: float = 0.05  # Soglia minima probabilità token
+    CONFIDENCE_DECAY: float = 0.9  # Decay per media mobile confidenza
+    LOW_CONFIDENCE_STREAK: int = 3  # Stop dopo N token consecutivi a bassa confidenza
+
+    # Limiti generazione
+    MAX_TOKENS: int = 256  # Massimo token per risposta
+    MIN_TOKENS: int = 5  # Minimo token (ignora confidence per primi N)
+
+    # Stop tokens
+    STOP_ON_NEWLINE: bool = True  # Stop su doppio newline
+    STOP_ON_PERIOD: bool = False  # Stop su punto (per risposte brevi)
+
+
+@dataclass
 class CheckpointConfig:
     """Configurazione checkpoint system"""
-    
+
     CHECKPOINT_DIR: Path = Path("checkpoints")
     AUTO_CHECKPOINT_INTERVAL: int = 100  # Salva ogni N esempi
     CHECKPOINT_VERSION: int = 3  # V3 con vocab dinamico
@@ -250,6 +271,7 @@ def get_config_preset(preset_name: str = "default"):
 MODEL_CONFIG = ModelConfig()
 TRAINING_CONFIG = TrainingConfig()
 PERFORMANCE_CONFIG = PerformanceConfig()
+GENERATION_CONFIG = GenerationConfig()
 CHECKPOINT_CONFIG = CheckpointConfig()
 RUNTIME_CONFIG = RuntimeConfig()
 

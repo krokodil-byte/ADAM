@@ -1846,6 +1846,191 @@ int get_output(int* output, int max_len) {
     return len;
 }
 
+// Generate next token with probability
+// Returns: sampled token ID, writes probability to out_prob
+int generate_next_token(int* input_tokens, int num_tokens, float temperature, float* out_prob) {
+    if (!g_system || num_tokens == 0) return -1;
+
+    // Cap sequence length
+    int seq_len = (num_tokens > MAX_SEQ_LEN) ? MAX_SEQ_LEN : num_tokens;
+
+    // Copy input to device
+    cudaMemcpy(g_system->llm.current_sequence, input_tokens, seq_len * sizeof(int), cudaMemcpyHostToDevice);
+    g_system->llm.seq_len = seq_len;
+
+    // Run forward pass (embedding → attention → ffn → output)
+    dim3 block_emb(EMBED_DIM);
+    dim3 grid_emb(seq_len);
+
+    embedding_forward_kernel<<<grid_emb, block_emb>>>(
+        g_system->llm.current_sequence,
+        g_system->llm.char_embeddings,
+        g_system->llm.word_embeddings,
+        g_system->llm.hidden_states,
+        seq_len,
+        EMBED_DIM
+    );
+
+    // Attention (simplified - just last position)
+    dim3 grid_attn(1);
+    attention_forward_kernel<<<grid_attn, 1>>>(
+        g_system->llm.hidden_states,
+        g_system->llm.attention_weights,
+        g_system->llm.attention_output,
+        seq_len,
+        NUM_HEADS,
+        EMBED_DIM
+    );
+
+    // FFN
+    ffn_forward_kernel<<<grid_emb, block_emb>>>(
+        g_system->llm.hidden_states,
+        g_system->llm.ffn_weights,
+        g_system->llm.ffn_output,
+        seq_len,
+        EMBED_DIM
+    );
+
+    // Output projection for last position only
+    int last_pos = seq_len - 1;
+    dim3 block_out(256);
+    dim3 grid_out((TOTAL_VOCAB_SIZE + 255) / 256);
+
+    output_projection_kernel<<<grid_out, block_out>>>(
+        g_system->llm.hidden_states,
+        g_system->llm.output_weights,
+        g_system->llm.logits,
+        last_pos,
+        EMBED_DIM,
+        TOTAL_VOCAB_SIZE
+    );
+
+    cudaDeviceSynchronize();
+
+    // Copy logits for last position to host
+    float* h_logits = (float*)malloc(TOTAL_VOCAB_SIZE * sizeof(float));
+    cudaMemcpy(h_logits, g_system->llm.logits + last_pos * TOTAL_VOCAB_SIZE,
+               TOTAL_VOCAB_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Apply temperature and compute softmax
+    float max_logit = h_logits[0];
+    for (int i = 1; i < TOTAL_VOCAB_SIZE; i++) {
+        if (h_logits[i] > max_logit) max_logit = h_logits[i];
+    }
+
+    float sum_exp = 0.0f;
+    for (int i = 0; i < TOTAL_VOCAB_SIZE; i++) {
+        h_logits[i] = expf((h_logits[i] - max_logit) / temperature);
+        sum_exp += h_logits[i];
+    }
+
+    // Normalize to probabilities
+    for (int i = 0; i < TOTAL_VOCAB_SIZE; i++) {
+        h_logits[i] /= sum_exp;
+    }
+
+    // Sample from distribution
+    float r = (float)rand() / (float)RAND_MAX;
+    float cumsum = 0.0f;
+    int sampled_token = 0;
+
+    for (int i = 0; i < TOTAL_VOCAB_SIZE; i++) {
+        cumsum += h_logits[i];
+        if (r < cumsum) {
+            sampled_token = i;
+            break;
+        }
+    }
+
+    // Return probability of sampled token
+    *out_prob = h_logits[sampled_token];
+
+    free(h_logits);
+    return sampled_token;
+}
+
+// Get probabilities for all tokens (for analysis)
+int get_token_probabilities(int* input_tokens, int num_tokens, float temperature, float* out_probs, int max_vocab) {
+    if (!g_system || num_tokens == 0) return -1;
+
+    // Similar forward pass as generate_next_token
+    int seq_len = (num_tokens > MAX_SEQ_LEN) ? MAX_SEQ_LEN : num_tokens;
+
+    cudaMemcpy(g_system->llm.current_sequence, input_tokens, seq_len * sizeof(int), cudaMemcpyHostToDevice);
+    g_system->llm.seq_len = seq_len;
+
+    // Forward pass
+    dim3 block_emb(EMBED_DIM);
+    dim3 grid_emb(seq_len);
+
+    embedding_forward_kernel<<<grid_emb, block_emb>>>(
+        g_system->llm.current_sequence,
+        g_system->llm.char_embeddings,
+        g_system->llm.word_embeddings,
+        g_system->llm.hidden_states,
+        seq_len,
+        EMBED_DIM
+    );
+
+    dim3 grid_attn(1);
+    attention_forward_kernel<<<grid_attn, 1>>>(
+        g_system->llm.hidden_states,
+        g_system->llm.attention_weights,
+        g_system->llm.attention_output,
+        seq_len,
+        NUM_HEADS,
+        EMBED_DIM
+    );
+
+    ffn_forward_kernel<<<grid_emb, block_emb>>>(
+        g_system->llm.hidden_states,
+        g_system->llm.ffn_weights,
+        g_system->llm.ffn_output,
+        seq_len,
+        EMBED_DIM
+    );
+
+    int last_pos = seq_len - 1;
+    dim3 block_out(256);
+    dim3 grid_out((TOTAL_VOCAB_SIZE + 255) / 256);
+
+    output_projection_kernel<<<grid_out, block_out>>>(
+        g_system->llm.hidden_states,
+        g_system->llm.output_weights,
+        g_system->llm.logits,
+        last_pos,
+        EMBED_DIM,
+        TOTAL_VOCAB_SIZE
+    );
+
+    cudaDeviceSynchronize();
+
+    // Copy and process logits
+    int vocab_size = (max_vocab < TOTAL_VOCAB_SIZE) ? max_vocab : TOTAL_VOCAB_SIZE;
+    float* h_logits = (float*)malloc(TOTAL_VOCAB_SIZE * sizeof(float));
+    cudaMemcpy(h_logits, g_system->llm.logits + last_pos * TOTAL_VOCAB_SIZE,
+               TOTAL_VOCAB_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Softmax
+    float max_logit = h_logits[0];
+    for (int i = 1; i < TOTAL_VOCAB_SIZE; i++) {
+        if (h_logits[i] > max_logit) max_logit = h_logits[i];
+    }
+
+    float sum_exp = 0.0f;
+    for (int i = 0; i < TOTAL_VOCAB_SIZE; i++) {
+        h_logits[i] = expf((h_logits[i] - max_logit) / temperature);
+        sum_exp += h_logits[i];
+    }
+
+    for (int i = 0; i < vocab_size; i++) {
+        out_probs[i] = h_logits[i] / sum_exp;
+    }
+
+    free(h_logits);
+    return vocab_size;
+}
+
 void get_stats(long long* cycles, long long* tokens, float* temp, float* momentum, float* loss, float* perplexity) {
     if (!g_system) return;
     *cycles = g_system->self_training_cycles;
