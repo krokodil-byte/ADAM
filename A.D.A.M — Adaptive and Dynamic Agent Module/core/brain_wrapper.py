@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG
+from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG, PERFORMANCE_CONFIG
 from .vocabulary import DynamicVocabulary
 from .pipeline import AsyncBatchLoader, PipelinedTrainer, BatchData
 
@@ -161,8 +161,14 @@ class VectLLMBrain:
             self._setup_api()
         else:
             self.lib = None
-        
+
         self.initialized = False
+
+        # Preallocated buffers for performance
+        self._token_buffer = None
+        self._token_buffer_size = 0
+        if hasattr(PERFORMANCE_CONFIG, 'PREALLOCATE_BUFFERS') and PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS:
+            self._preallocate_training_buffers()
         
     def _setup_api(self):
         """Setup function signatures per ctypes"""
@@ -437,23 +443,44 @@ class VectLLMBrain:
         
         return self.lib.get_current_word_vocab_size()
     
+    def _preallocate_training_buffers(self):
+        """Preallocate ctypes buffers for training to avoid repeated allocations."""
+        try:
+            # Allocate buffer for max sequence length * 4 (reasonable overhead)
+            max_tokens = MODEL_CONFIG.MAX_SEQ_LEN * 4
+            self._token_buffer = (ctypes.c_int * max_tokens)()
+            self._token_buffer_size = max_tokens
+        except Exception:
+            # Fallback to dynamic allocation
+            self._token_buffer = None
+            self._token_buffer_size = 0
+
     def feed_training_batch(self, tokens: List[int]) -> int:
         """
         Feed batch di token per training.
-        
+
         Args:
             tokens: Lista di token IDs
-            
+
         Returns:
             Numero di token processati (-1 se errore)
         """
         if not tokens:
             return 0
-        
-        # Convert to ctypes array
-        token_array = (ctypes.c_int * len(tokens))(*tokens)
-        
-        result = self.lib.feed_training_batch(token_array, len(tokens))
+
+        n_tokens = len(tokens)
+
+        # Use preallocated buffer if available and fits
+        if self._token_buffer is not None and n_tokens <= self._token_buffer_size:
+            # Fast copy using numpy and ctypes
+            token_np = np.array(tokens, dtype=np.int32)
+            ctypes.memmove(self._token_buffer, token_np.ctypes.data, n_tokens * 4)
+            result = self.lib.feed_training_batch(self._token_buffer, n_tokens)
+        else:
+            # Fallback to dynamic allocation
+            token_array = (ctypes.c_int * n_tokens)(*tokens)
+            result = self.lib.feed_training_batch(token_array, n_tokens)
+
         return result
     
     def train_on_text(self, text: str, passes: int = 1) -> int:
