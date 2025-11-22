@@ -42,6 +42,8 @@ class ADAMTUI:
             'language': 'en',
             'batch_size': 100,
             'max_articles': 0,
+            'dataset_path': '',
+            'extensions': '.txt,.md',
         }
 
         # Menu definitions
@@ -82,6 +84,19 @@ class ADAMTUI:
                     ('passes', '🔄 Passes per Batch', 'Training passes per batch'),
                     ('preset', '⚡ Preset', 'Configuration preset'),
                     ('run', '▶️  Start Training', 'Begin Wikipedia training'),
+                    ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'dataset': {
+                'title': 'Dataset Training',
+                'items': [
+                    ('dataset_path', '📂 Dataset Path', 'File or directory path'),
+                    ('output', '💾 Output Checkpoint', 'Where to save the model'),
+                    ('checkpoint', '📦 Load Checkpoint', 'Resume from checkpoint'),
+                    ('passes', '🔄 Passes', 'Number of training passes'),
+                    ('preset', '⚡ Preset', 'Configuration preset'),
+                    ('extensions', '📄 Extensions', 'File extensions (.txt,.md)'),
+                    ('run', '▶️  Start Training', 'Begin dataset training'),
                     ('back', '← Back', 'Return to main menu'),
                 ]
             },
@@ -297,18 +312,48 @@ class ADAMTUI:
             return str(self.values['batch_size'])
         elif key == 'articles':
             return str(self.values['max_articles']) if self.values['max_articles'] else "unlimited"
+        elif key == 'dataset_path':
+            return self.values['dataset_path'] or "(not set)"
+        elif key == 'extensions':
+            return self.values['extensions']
         return ""
 
     def _handle_selection(self, stdscr, key: str):
         """Handle menu item selection"""
         # Navigation
         if key == 'back':
-            self.current_menu = 'main'
+            if self.current_menu in ['generation', 'performance']:
+                self.current_menu = 'settings'
+            else:
+                self.current_menu = 'main'
             self.selected_item = 0
             return
         elif key == 'quit':
             return  # Will exit loop
-        elif key in self.menus:
+
+        # Settings categories - handle BEFORE menu navigation
+        # so we call _edit_settings instead of navigating to their menus
+        if key == 'model':
+            self._edit_settings(stdscr, 'model')
+            return
+        elif key == 'training':
+            self._edit_settings(stdscr, 'training')
+            return
+        elif key == 'generation':
+            self._edit_settings(stdscr, 'generation')
+            return
+        elif key == 'performance':
+            self._edit_settings(stdscr, 'performance')
+            return
+        elif key == 'system':
+            self._edit_settings(stdscr, 'system')
+            return
+        elif key == 'save':
+            self._save_settings()
+            return
+
+        # Menu navigation (for non-settings menus)
+        if key in self.menus:
             self.current_menu = key
             self.selected_item = 0
             return
@@ -368,26 +413,24 @@ class ADAMTUI:
                     self.message = "Invalid number"
                     self.message_type = "error"
 
+        # Dataset inputs
+        elif key == 'dataset_path':
+            value = self._input_dialog(stdscr, "Dataset Path", self.values['dataset_path'])
+            if value is not None:
+                self.values['dataset_path'] = value
+        elif key == 'extensions':
+            value = self._input_dialog(stdscr, "Extensions (comma-sep)", self.values['extensions'])
+            if value is not None:
+                self.values['extensions'] = value
+
         # Run commands
         elif key == 'run':
             if self.current_menu == 'train':
                 self._run_train(stdscr)
             elif self.current_menu == 'wikipedia':
                 self._run_wikipedia(stdscr)
-
-        # Settings
-        elif key == 'model':
-            self._edit_settings(stdscr, 'model')
-        elif key == 'training':
-            self._edit_settings(stdscr, 'training')
-        elif key == 'generation':
-            self._edit_settings(stdscr, 'generation')
-        elif key == 'performance':
-            self._edit_settings(stdscr, 'performance')
-        elif key == 'system':
-            self._edit_settings(stdscr, 'system')
-        elif key == 'save':
-            self._save_settings()
+            elif self.current_menu == 'dataset':
+                self._run_dataset(stdscr)
 
     def _input_dialog(self, stdscr, title: str, default: str = "") -> Optional[str]:
         """Show input dialog"""
@@ -599,6 +642,33 @@ class ADAMTUI:
         if self.values['max_articles']:
             cmd += f" --max-articles {self.values['max_articles']}"
         cmd += f" --preset {self.values['preset']}"
+
+        print(f"\n$ {cmd}\n")
+        os.system(cmd)
+
+        input("\nPress Enter to continue...")
+        stdscr.clear()
+        stdscr.refresh()
+
+    def _run_dataset(self, stdscr):
+        """Run dataset training"""
+        if not self.values['dataset_path']:
+            self.message = "✗ Dataset path required"
+            self.message_type = "error"
+            return
+
+        curses.endwin()
+
+        # Build command
+        cmd = f"adam dataset {self.values['dataset_path']}"
+        if self.values['output_file']:
+            cmd += f" -o {self.values['output_file']}"
+        if self.values['checkpoint']:
+            cmd += f" -c {self.values['checkpoint']}"
+        cmd += f" -p {self.values['passes']}"
+        cmd += f" --preset {self.values['preset']}"
+        if self.values['extensions']:
+            cmd += f" --extensions {self.values['extensions']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
