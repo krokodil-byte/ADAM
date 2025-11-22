@@ -129,6 +129,7 @@ class ADAMTUI:
             'performance': {
                 'title': 'Performance Settings',
                 'items': [
+                    ('gpu_arch', '🖥️ GPU Arch', 'CUDA compute capability (sm_86 for RTX 30xx)'),
                     ('use_cublas', '🔢 Use cuBLAS', 'Enable cuBLAS for matrix operations'),
                     ('use_fused', '🧩 Fused Kernels', 'Enable fused attention+FFN kernels'),
                     ('pipeline', '🔀 Pipeline Mode', 'H2D/compute/D2H overlap'),
@@ -136,6 +137,7 @@ class ADAMTUI:
                     ('pinned', '📌 Pinned Memory', 'Use pinned host memory'),
                     ('warp', '🔄 Warp Primitives', 'Use warp-level shuffle operations'),
                     ('target', '🎯 GPU Target', 'Target GPU utilization %'),
+                    ('preallocate', '📦 Preallocate', 'Preallocate buffers at init'),
                     ('back', '← Back', 'Return to settings'),
                 ]
             },
@@ -160,6 +162,7 @@ class ADAMTUI:
                 'temperature': TRAINING_CONFIG.EXPLORATION_TEMPERATURE,
             },
             'performance': {
+                'gpu_arch': RUNTIME_CONFIG.NVCC_ARCH,
                 'use_cublas': PERFORMANCE_CONFIG.USE_CUBLAS,
                 'use_fused': PERFORMANCE_CONFIG.USE_FUSED_KERNELS,
                 'pipeline': PERFORMANCE_CONFIG.PIPELINE_MODE,
@@ -167,6 +170,7 @@ class ADAMTUI:
                 'pinned': PERFORMANCE_CONFIG.USE_PINNED_MEMORY,
                 'warp': PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES,
                 'target': PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET,
+                'preallocate': PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS,
             },
             'generation': {
                 'temperature': GENERATION_CONFIG.TEMPERATURE,
@@ -388,10 +392,15 @@ class ADAMTUI:
                     self.message = "Invalid number"
                     self.message_type = "error"
         elif key == 'preset':
-            presets = ['default', 'fast_learning', 'stable', 'inference', 'research']
+            presets = ['default', 'fast_learning', 'stable', 'high_performance', 'max_throughput', 'memory_efficient']
             idx = self._select_dialog(stdscr, "Select Preset", presets)
             if idx >= 0:
                 self.values['preset'] = presets[idx]
+                # Apply preset immediately to global config
+                from core.config import set_config_from_preset
+                set_config_from_preset(presets[idx])
+                self.message = f"Preset '{presets[idx]}' applied"
+                self.message_type = "success"
         elif key == 'language':
             value = self._input_dialog(stdscr, "Language Code", self.values['language'])
             if value is not None:
@@ -560,14 +569,37 @@ class ADAMTUI:
                     try:
                         # Convert to appropriate type
                         old_value = settings[setting_key]
-                        if isinstance(old_value, int):
+                        if isinstance(old_value, bool):
+                            settings[setting_key] = new_value.lower() in ('true', '1', 'yes')
+                        elif isinstance(old_value, int):
                             settings[setting_key] = int(new_value)
                         elif isinstance(old_value, float):
                             settings[setting_key] = float(new_value)
                         else:
                             settings[setting_key] = new_value
+
+                        # Apply performance settings to global config
+                        if category == 'performance':
+                            self._apply_performance_settings()
                     except ValueError:
                         pass
+
+    def _apply_performance_settings(self):
+        """Apply performance settings to global config objects"""
+        perf = self.settings['performance']
+
+        # Apply to RUNTIME_CONFIG
+        RUNTIME_CONFIG.NVCC_ARCH = perf['gpu_arch']
+
+        # Apply to PERFORMANCE_CONFIG
+        PERFORMANCE_CONFIG.USE_CUBLAS = perf['use_cublas']
+        PERFORMANCE_CONFIG.USE_FUSED_KERNELS = perf['use_fused']
+        PERFORMANCE_CONFIG.PIPELINE_MODE = perf['pipeline']
+        PERFORMANCE_CONFIG.ASYNC_TRANSFERS = perf['async']
+        PERFORMANCE_CONFIG.USE_PINNED_MEMORY = perf['pinned']
+        PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES = perf['warp']
+        PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET = perf['target']
+        PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS = perf['preallocate']
 
     def _save_settings(self):
         """Save settings to file"""

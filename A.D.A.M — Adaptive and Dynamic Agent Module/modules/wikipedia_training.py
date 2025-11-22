@@ -20,11 +20,13 @@ try:
     from core.stats import StatsCollector
     from core.pipeline import PipelinedTrainer
     from Utils.checkpoint import CheckpointManager
+    from modules.training_logger import get_logger
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
     from ..core.pipeline import PipelinedTrainer
     from ..utils.checkpoint import CheckpointManager
+    from ..modules.training_logger import get_logger
 
 
 def get_memory_usage_percent() -> float:
@@ -76,10 +78,11 @@ class WikipediaAPIFetcher:
         # Article buffer
         self.articles: List[Tuple[str, str]] = []
         self.total_fetched = 0
+        self.logger = get_logger()
 
-        print(f"📡 Wikipedia API Fetcher initialized")
-        print(f"   Language: {language}")
-        print(f"   Batch size: {batch_size} articles")
+        self.logger.info(f"Wikipedia API Fetcher initialized")
+        self.logger.info(f"  Language: {language}")
+        self.logger.info(f"  Batch size: {batch_size} articles")
 
     def _api_request(self, params: dict) -> dict:
         """Make API request to Wikipedia"""
@@ -97,7 +100,7 @@ class WikipediaAPIFetcher:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode('utf-8'))
         except Exception as e:
-            print(f"   ⚠️  API error: {e}")
+            self.logger.warning(f"API error: {e}")
             return {}
 
     def _get_random_titles(self, count: int = 10) -> List[str]:
@@ -157,13 +160,13 @@ class WikipediaAPIFetcher:
         fetched = 0
         target_articles = self.batch_size
 
-        print(f"\n📥 Fetching {target_articles} articles...")
+        self.logger.info(f"Fetching {target_articles} articles...")
 
         while fetched < target_articles:
             titles = self._get_random_titles(api_batch_size)
 
             if not titles:
-                print("   ⚠️  No titles received, retrying...")
+                self.logger.warning("No titles received, retrying...")
                 time.sleep(1)
                 continue
 
@@ -182,12 +185,12 @@ class WikipediaAPIFetcher:
                         self.total_fetched += 1
 
                         if fetched % 10 == 0:
-                            print(f"   Fetched {fetched}/{target_articles} articles")
+                            self.logger.info(f"  Fetched {fetched}/{target_articles} articles")
 
             # Small delay to be nice to Wikipedia API
             time.sleep(0.5)
 
-        print(f"   ✓ Batch complete: {fetched} articles")
+        self.logger.info(f"  Batch complete: {fetched} articles")
         return fetched
 
     def get_articles(self) -> List[Tuple[str, str]]:
@@ -198,7 +201,7 @@ class WikipediaAPIFetcher:
         """Clear article buffer and free memory"""
         self.articles = []
         gc.collect()
-        print(f"   🧹 Buffer cleared (RAM: {get_memory_usage_percent():.1f}%)")
+        self.logger.debug(f"Buffer cleared (RAM: {get_memory_usage_percent():.1f}%)")
 
     def iter_articles(self) -> Iterator[Tuple[str, str]]:
         """Iterate over buffered articles"""
@@ -225,10 +228,11 @@ class WikipediaExtractor:
         
         if not self.dump_path.exists():
             raise FileNotFoundError(f"Dump not found: {dump_path}")
-        
+
         # Detect format
         self.format = self._detect_format()
-        print(f"📚 Wikipedia dump format: {self.format}")
+        logger = get_logger()
+        logger.info(f"Wikipedia dump format: {self.format}")
     
     def _detect_format(self) -> str:
         """Rileva formato dump"""
@@ -359,6 +363,7 @@ class WikipediaTrainer:
         self.extractor = extractor
         self.stats = stats_collector or StatsCollector()
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
+        self.logger = get_logger()
     
     def train(self,
               max_articles: Optional[int] = None,
@@ -376,11 +381,12 @@ class WikipediaTrainer:
             Dict con statistiche finali
         """
         if verbose:
-            print("📚 Starting Wikipedia training")
-            print(f"   Source: {self.extractor.dump_path.name}")
-            print(f"   Max articles: {max_articles or 'unlimited'}")
-            print(f"   Auto-save: every {auto_save_every} articles")
-            print()
+            self.logger.training_start(
+                "Wikipedia Dump",
+                source=self.extractor.dump_path.name,
+                max_articles=max_articles or 'unlimited',
+                auto_save=f"every {auto_save_every} articles"
+            )
         
         total_tokens = 0
         articles_processed = 0
@@ -391,18 +397,14 @@ class WikipediaTrainer:
             if max_articles and article_num > max_articles:
                 break
             
-            if verbose and article_num % 10 == 0:
-                print(f"\n📖 Article {article_num}: {title[:50]}...")
-                print(f"   Length: {len(text):,} chars")
-            
             # Train on article
             article_start = time.time()
             processed = self.brain.train_on_text(text, passes=1)
             article_time = time.time() - article_start
-            
+
             total_tokens += processed
             articles_processed += 1
-            
+
             # Update stats
             brain_stats = self.brain.get_stats()
             self.stats.update(
@@ -411,21 +413,20 @@ class WikipediaTrainer:
                 loss=brain_stats['loss'],
                 vocab_size=brain_stats['vocab_words']
             )
-            
+
             if verbose and article_num % 10 == 0:
-                tokens_per_sec = processed / article_time if article_time > 0 else 0
-                print(f"   Processed: {processed:,} tokens ({tokens_per_sec:.0f} tok/s)")
-                print(f"   Loss: {brain_stats['loss']:.4f} {self.stats.get_loss_trend()}")
-                print(f"   Vocab: {brain_stats['vocab_words']:,} words")
-            
+                self.logger.article_progress(
+                    article_num, title, processed, brain_stats['loss'], brain_stats['vocab_words']
+                )
+
             # Auto-save
             if article_num % auto_save_every == 0:
                 ckpt_name = f"wiki_article{article_num}.ckpt"
                 ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
-                
+
                 if verbose:
-                    print(f"   💾 Auto-saving: {ckpt_name}")
-                
+                    self.logger.checkpoint_save(ckpt_name)
+
                 self.brain.save_checkpoint(str(ckpt_path))
         
         # Final stats
@@ -433,16 +434,13 @@ class WikipediaTrainer:
         final_stats = self.stats.get_summary()
         
         if verbose:
-            print("\n" + "=" * 70)
-            print("🎉 Wikipedia training complete!")
-            print("=" * 70)
-            print(f"Articles: {articles_processed}")
-            print(f"Tokens: {total_tokens:,}")
-            print(f"Time: {elapsed/60:.1f} minutes")
-            print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
-            print(f"Loss: {final_stats['loss']:.4f}")
-            print(f"Vocab: {final_stats['vocab_size']:,} words")
-            print()
+            self.logger.training_end(
+                articles=articles_processed,
+                tokens=total_tokens,
+                speed=total_tokens/elapsed if elapsed > 0 else 0,
+                loss=final_stats['loss'],
+                vocab=final_stats['vocab_size']
+            )
         
         return final_stats
 
@@ -471,6 +469,7 @@ class WikipediaStreamTrainer:
         )
         self.stats = stats_collector or StatsCollector()
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
+        self.logger = get_logger()
 
     def train(self,
               max_articles: Optional[int] = None,
@@ -500,15 +499,14 @@ class WikipediaStreamTrainer:
             Dict con statistiche finali
         """
         if verbose:
-            print("📚 Starting Wikipedia Stream Training")
-            print(f"   Language: {self.fetcher.language}")
-            print(f"   Batch size: {self.fetcher.batch_size} articles")
-            print(f"   Max articles: {max_articles or 'unlimited'}")
-            print(f"   Passes per batch: {passes_per_batch}")
-            print(f"   Pipeline mode: {'enabled' if use_pipeline else 'disabled'}")
-            if use_pipeline:
-                print(f"   Prefetch size: {prefetch_size}")
-            print()
+            self.logger.training_start(
+                "Wikipedia Stream",
+                language=self.fetcher.language,
+                batch_size=f"{self.fetcher.batch_size} articles",
+                max_articles=max_articles or 'unlimited',
+                passes_per_batch=passes_per_batch,
+                pipeline='enabled' if use_pipeline else 'disabled'
+            )
 
         total_tokens = 0
         articles_processed = 0
@@ -525,14 +523,12 @@ class WikipediaStreamTrainer:
 
                 # 1. Fetch batch
                 if verbose:
-                    print(f"\n{'='*60}")
-                    print(f"📦 BATCH {batch_num}")
-                    print(f"{'='*60}")
+                    self.logger.info(f"BATCH {batch_num}")
 
                 fetched = self.fetcher.fetch_batch()
 
                 if fetched == 0:
-                    print("   ⚠️  No articles fetched, retrying...")
+                    self.logger.warning("No articles fetched, retrying...")
                     time.sleep(5)
                     continue
 
@@ -542,7 +538,7 @@ class WikipediaStreamTrainer:
 
                 for pass_num in range(1, passes_per_batch + 1):
                     if verbose:
-                        print(f"\n   📖 Pass {pass_num}/{passes_per_batch}")
+                        self.logger.pass_start(pass_num, passes_per_batch)
 
                     if use_pipeline:
                         # Pipelined training - overlap CPU encoding with GPU training
@@ -574,8 +570,9 @@ class WikipediaStreamTrainer:
                             # Progress update
                             if verbose and i % 10 == 0:
                                 stats = self.brain.get_stats()
-                                print(f"      Article {i+1}/{fetched}: {title[:40]}...")
-                                print(f"      Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']}")
+                                self.logger.article_progress(
+                                    i+1, title, processed, stats['loss'], stats['vocab_words']
+                                )
 
                             # Auto-save
                             if article_num % auto_save_every == 0:
@@ -583,7 +580,7 @@ class WikipediaStreamTrainer:
                                 ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
 
                                 if verbose:
-                                    print(f"      💾 Auto-saving: {ckpt_name}")
+                                    self.logger.checkpoint_save(ckpt_name)
 
                                 self.brain.save_checkpoint(str(ckpt_path))
 
@@ -604,35 +601,27 @@ class WikipediaStreamTrainer:
 
                 if verbose:
                     tokens_per_sec = batch_tokens / batch_time if batch_time > 0 else 0
-                    print(f"\n   ✓ Batch {batch_num} complete")
-                    print(f"     Articles: {fetched}")
-                    print(f"     Tokens: {batch_tokens:,} ({tokens_per_sec:.0f}/s)")
-                    print(f"     Total processed: {articles_processed}")
-                    print(f"     Loss: {brain_stats['loss']:.4f}")
+                    self.logger.batch_progress(batch_num, batch_tokens, brain_stats['loss'], tokens_per_sec)
 
                 # 3. Clear buffer
                 self.fetcher.clear_buffer()
 
         except KeyboardInterrupt:
-            print("\n\n⚠️  Training interrupted by user")
+            self.logger.interrupted()
 
         # Final stats
         elapsed = time.time() - start_time
         final_stats = self.stats.get_summary()
 
         if verbose:
-            print("\n" + "=" * 70)
-            print("🎉 Wikipedia Stream Training complete!")
-            print("=" * 70)
-            print(f"Batches: {batch_num}")
-            print(f"Articles: {articles_processed}")
-            print(f"Tokens: {total_tokens:,}")
-            print(f"Time: {elapsed/60:.1f} minutes")
-            if elapsed > 0:
-                print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
-            print(f"Loss: {final_stats['loss']:.4f}")
-            print(f"Vocab: {final_stats['vocab_size']:,} words")
-            print()
+            self.logger.training_end(
+                batches=batch_num,
+                articles=articles_processed,
+                tokens=total_tokens,
+                speed=total_tokens/elapsed if elapsed > 0 else 0,
+                loss=final_stats['loss'],
+                vocab=final_stats['vocab_size']
+            )
 
         return final_stats
 
@@ -691,8 +680,9 @@ class WikipediaStreamTrainer:
             # Progress update
             if verbose and processed_count[0] % 10 == 0:
                 stats = self.brain.get_stats()
-                print(f"      Article {processed_count[0]}/{len(texts)}: {title[:40]}...")
-                print(f"      Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']}")
+                self.logger.article_progress(
+                    processed_count[0], title, tokens, stats['loss'], stats['vocab_words']
+                )
 
             # Auto-save check
             if article_num % auto_save_every == 0 and article_num > last_save_article[0]:
@@ -701,7 +691,7 @@ class WikipediaStreamTrainer:
                 ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
 
                 if verbose:
-                    print(f"      💾 Auto-saving: {ckpt_name}")
+                    self.logger.checkpoint_save(ckpt_name)
 
                 self.brain.save_checkpoint(str(ckpt_path))
 
@@ -720,8 +710,10 @@ class WikipediaStreamTrainer:
         # Get pipeline stats
         pipeline_stats = trainer.get_stats()
         if verbose and pass_num == 1:
-            print(f"      Pipeline stats: {pipeline_stats['throughput_tok_s']:.0f} tok/s, "
-                  f"avg batch: {pipeline_stats['avg_tokens_per_batch']:.0f} tokens")
+            self.logger.pipeline_stats(
+                pipeline_stats['throughput_tok_s'],
+                pipeline_stats.get('gpu_utilization', 0)
+            )
 
         return batch_tokens
 

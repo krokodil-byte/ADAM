@@ -45,38 +45,44 @@ class TrainingMetrics:
 
 class StatsCollector:
     """Raccolta statistiche durante training"""
-    
-    def __init__(self, window_size: int = 100):
+
+    def __init__(self, window_size: int = 100, history_sample_rate: int = 1):
         """
         Args:
             window_size: Dimensione finestra per medie mobili
+            history_sample_rate: Record history every N updates (1=all, 10=every 10th)
         """
         self.metrics = TrainingMetrics()
         self.window_size = window_size
-        
+        self.history_sample_rate = history_sample_rate
+
         # Buffers per medie mobili
         self.loss_window = deque(maxlen=window_size)
         self.speed_window = deque(maxlen=window_size)
-        
+
         # Checkpoints
         self.checkpoint_metrics: List[Dict] = []
+
+        # Update counter for downsampling
+        self._update_count = 0
         
-    def update(self, 
+    def update(self,
                cycles: int = None,
                tokens: int = None,
                loss: float = None,
                vocab_size: int = None,
                vocab_utilization: float = None):
         """Aggiorna metriche"""
-        
+
         now = time.time()
         dt = now - self.metrics.last_update
-        
+        self._update_count += 1
+
         if cycles is not None:
             self.metrics.total_cycles = cycles
             if dt > 0:
                 self.metrics.cycles_per_second = (cycles - self.metrics.total_cycles) / dt
-        
+
         if tokens is not None:
             delta_tokens = tokens - self.metrics.total_tokens
             self.metrics.total_tokens = tokens
@@ -84,18 +90,20 @@ class StatsCollector:
                 tps = delta_tokens / dt
                 self.speed_window.append(tps)
                 self.metrics.tokens_per_second = sum(self.speed_window) / len(self.speed_window)
-        
+
         if loss is not None:
             self.metrics.current_loss = loss
             self.loss_window.append(loss)
-            self.metrics.loss_history.append((now, loss))
-        
+            # Downsample history recording for performance
+            if self._update_count % self.history_sample_rate == 0:
+                self.metrics.loss_history.append((now, loss))
+
         if vocab_size is not None:
             self.metrics.vocab_size = vocab_size
-        
+
         if vocab_utilization is not None:
             self.metrics.vocab_utilization = vocab_utilization
-        
+
         self.metrics.last_update = now
     
     def get_perplexity(self) -> float:

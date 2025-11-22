@@ -18,6 +18,12 @@ from typing import List, Iterator, Optional, Callable, Any
 from dataclasses import dataclass
 import numpy as np
 
+# Import performance config
+try:
+    from core.config import PERFORMANCE_CONFIG, MODEL_CONFIG
+except ImportError:
+    from .config import PERFORMANCE_CONFIG, MODEL_CONFIG
+
 
 @dataclass
 class BatchData:
@@ -207,6 +213,38 @@ class PipelinedTrainer:
         self.total_tokens = 0
         self.gpu_time = 0.0
         self.cpu_time = 0.0
+
+        # Preallocated buffers for performance
+        self._preallocated = False
+        self._token_buffer = None
+        self._token_buffer_size = 0
+
+        if hasattr(PERFORMANCE_CONFIG, 'PREALLOCATE_BUFFERS') and PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS:
+            self._preallocate_buffers()
+
+    def _preallocate_buffers(self):
+        """Preallocate host buffers to avoid allocation overhead."""
+        try:
+            max_seq = MODEL_CONFIG.MAX_SEQ_LEN
+            # Estimate max tokens per batch (4x max_seq as buffer)
+            max_tokens = max_seq * 4
+
+            self._token_buffer = np.zeros(max_tokens, dtype=np.int32)
+            self._token_buffer_size = max_tokens
+            self._preallocated = True
+        except Exception as e:
+            # Fallback to dynamic allocation
+            self._preallocated = False
+
+    def _get_token_array(self, tokens: List[int]) -> np.ndarray:
+        """Get token array, using preallocated buffer if available."""
+        if self._preallocated and len(tokens) <= self._token_buffer_size:
+            # Use preallocated buffer
+            self._token_buffer[:len(tokens)] = tokens
+            return self._token_buffer[:len(tokens)]
+        else:
+            # Dynamic allocation
+            return np.array(tokens, dtype=np.int32)
 
     def start(self):
         """Avvia pipeline"""
