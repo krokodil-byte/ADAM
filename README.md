@@ -23,7 +23,7 @@ A.D.A.M is an experimental language model that features continuous self-training
 
 ```bash
 git clone https://github.com/krokodil-byte/A.D.A.M-Alpha-by-Scuglia-Samuele-.git
-cd A.D.A.M-Adaptive-and-Dynamic-Agent-Module
+cd  A.D.A.M-Alpha-by-Scuglia-Samuele-
 pip install -e .
 ```
 
