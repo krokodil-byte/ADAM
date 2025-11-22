@@ -474,7 +474,7 @@ class VectLLMBrain:
         if self._token_buffer is not None and n_tokens <= self._token_buffer_size:
             # Fast copy using numpy and ctypes
             token_np = np.array(tokens, dtype=np.int32)
-            ctypes.memmove(self._token_buffer, token_np.ctypes.data, n_tokens * 4)
+            ctypes.memmove(ctypes.addressof(self._token_buffer), token_np.ctypes.data, n_tokens * 4)
             result = self.lib.feed_training_batch(self._token_buffer, n_tokens)
         else:
             # Fallback to dynamic allocation
