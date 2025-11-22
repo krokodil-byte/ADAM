@@ -353,6 +353,8 @@ class ADAMTUI:
             self._edit_settings(stdscr, 'model')
         elif key == 'training':
             self._edit_settings(stdscr, 'training')
+        elif key == 'performance':
+            self._edit_settings(stdscr, 'performance')
         elif key == 'system':
             self._edit_settings(stdscr, 'system')
         elif key == 'save':
