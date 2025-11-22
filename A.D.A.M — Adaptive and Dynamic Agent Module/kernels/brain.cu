@@ -2215,7 +2215,9 @@ int feed_training_batch(const int* tokens, int batch_size) {
         // Backward: Output projection (DUAL gradients)
         cudaMemset(g_system->llm.grad_output_weights, 0, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
         cudaMemset(g_system->llm.grad_hidden_states, 0, chunk_size * EMBED_DIM * sizeof(float));
-        
+
+        dim3 block_out(256);
+        dim3 grid_out((chunk_size * TOTAL_VOCAB_SIZE + 255) / 256);
         output_projection_backward_kernel<<<grid_out, block_out>>>(
             g_system->llm.logits,
             g_system->llm.current_sequence,
