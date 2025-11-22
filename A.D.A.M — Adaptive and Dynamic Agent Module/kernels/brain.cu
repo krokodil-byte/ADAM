@@ -2432,6 +2432,7 @@ int feed_training_batch(const int* tokens, int batch_size) {
         cross_entropy_loss_kernel<<<grid_loss, block_loss>>>(
             g_system->llm.logits,
             g_system->llm.current_sequence,
+            g_system->llm.word_valid_mask,
             &g_system->llm.current_loss,
             chunk_size,
             TOTAL_VOCAB_SIZE
@@ -2446,6 +2447,7 @@ int feed_training_batch(const int* tokens, int batch_size) {
         output_projection_backward_kernel<<<grid_out, block_out>>>(
             g_system->llm.logits,
             g_system->llm.current_sequence,
+            g_system->llm.word_valid_mask,
             g_system->llm.hidden_states,
             g_system->llm.grad_output_weights,
             g_system->llm.grad_hidden_states,
