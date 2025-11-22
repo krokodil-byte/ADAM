@@ -1863,30 +1863,34 @@ int generate_next_token(int* input_tokens, int num_tokens, float temperature, fl
     dim3 grid_emb(seq_len);
 
     embedding_forward_kernel<<<grid_emb, block_emb>>>(
-        g_system->llm.current_sequence,
         g_system->llm.char_embeddings,
         g_system->llm.word_embeddings,
+        g_system->llm.word_valid_mask,
+        g_system->llm.pos_embeddings,
+        g_system->llm.current_sequence,
         g_system->llm.hidden_states,
         seq_len,
         EMBED_DIM
     );
 
-    // Attention (simplified - just last position)
-    dim3 grid_attn(1);
-    attention_forward_kernel<<<grid_attn, 1>>>(
+    // Attention
+    dim3 grid_attn(seq_len, NUM_HEADS);
+    dim3 block_attn(EMBED_DIM / NUM_HEADS);
+    attention_forward_kernel<<<grid_attn, block_attn>>>(
         g_system->llm.hidden_states,
-        g_system->llm.attention_weights,
+        g_system->llm.qkv_weights,
         g_system->llm.attention_output,
         seq_len,
-        NUM_HEADS,
-        EMBED_DIM
+        EMBED_DIM,
+        NUM_HEADS
     );
 
     // FFN
     ffn_forward_kernel<<<grid_emb, block_emb>>>(
+        g_system->llm.attention_output,
+        g_system->llm.ffn_w1,
+        g_system->llm.ffn_w2,
         g_system->llm.hidden_states,
-        g_system->llm.ffn_weights,
-        g_system->llm.ffn_output,
         seq_len,
         EMBED_DIM
     );
@@ -1964,28 +1968,32 @@ int get_token_probabilities(int* input_tokens, int num_tokens, float temperature
     dim3 grid_emb(seq_len);
 
     embedding_forward_kernel<<<grid_emb, block_emb>>>(
-        g_system->llm.current_sequence,
         g_system->llm.char_embeddings,
         g_system->llm.word_embeddings,
+        g_system->llm.word_valid_mask,
+        g_system->llm.pos_embeddings,
+        g_system->llm.current_sequence,
         g_system->llm.hidden_states,
         seq_len,
         EMBED_DIM
     );
 
-    dim3 grid_attn(1);
-    attention_forward_kernel<<<grid_attn, 1>>>(
+    dim3 grid_attn(seq_len, NUM_HEADS);
+    dim3 block_attn(EMBED_DIM / NUM_HEADS);
+    attention_forward_kernel<<<grid_attn, block_attn>>>(
         g_system->llm.hidden_states,
-        g_system->llm.attention_weights,
+        g_system->llm.qkv_weights,
         g_system->llm.attention_output,
         seq_len,
-        NUM_HEADS,
-        EMBED_DIM
+        EMBED_DIM,
+        NUM_HEADS
     );
 
     ffn_forward_kernel<<<grid_emb, block_emb>>>(
+        g_system->llm.attention_output,
+        g_system->llm.ffn_w1,
+        g_system->llm.ffn_w2,
         g_system->llm.hidden_states,
-        g_system->llm.ffn_weights,
-        g_system->llm.ffn_output,
         seq_len,
         EMBED_DIM
     );
