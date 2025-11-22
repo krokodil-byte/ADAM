@@ -40,6 +40,17 @@ except ImportError:
     from ..modules.wikipedia_training import WikipediaExtractor, WikipediaTrainer, WikipediaStreamTrainer
     from ..modules.tui import run_adam_tui
 
+from datetime import datetime
+
+
+def get_default_checkpoint_path() -> str:
+    """Generate default checkpoint path with timestamp"""
+    checkpoint_dir = Path("./checkpoints")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return str(checkpoint_dir / f"model_{timestamp}.ckpt")
+
 
 def cmd_init(args):
     """Initialize VectLLM system"""
@@ -127,24 +138,24 @@ def cmd_train(args):
                 print(f"   💾 Auto-saving: {ckpt_file}")
                 brain.save_checkpoint(ckpt_file)
         
-        # Final save
-        if args.output:
-            print(f"\n💾 Saving checkpoint: {args.output}")
-            brain.save_checkpoint(args.output)
-        
+        # Final save (always save)
+        output_path = args.output or get_default_checkpoint_path()
+        print(f"\n💾 Saving checkpoint: {output_path}")
+        brain.save_checkpoint(output_path)
+
         # Vocab pruning
         if args.prune_vocab:
             print("\n🧹 Pruning vocabulary...")
             pruned = brain.prune_vocabulary()
             print(f"   Removed: {pruned} rare words")
-        
+
         print("\n✅ Training complete!")
-        
+
     except KeyboardInterrupt:
         print("\n⚠️  Training interrupted by user")
-        if args.output:
-            print(f"💾 Saving checkpoint: {args.output}")
-            brain.save_checkpoint(args.output)
+        output_path = args.output or get_default_checkpoint_path()
+        print(f"💾 Saving checkpoint: {output_path}")
+        brain.save_checkpoint(output_path)
     finally:
         brain.stop()
     
@@ -439,10 +450,16 @@ def cmd_wikipedia(args):
                 verbose=True
             )
 
-        # Save final
-        if args.output:
-            print(f"\n💾 Saving final checkpoint: {args.output}")
-            brain.save_checkpoint(args.output)
+        # Save final (always save)
+        output_path = args.output or get_default_checkpoint_path()
+        print(f"\n💾 Saving final checkpoint: {output_path}")
+        brain.save_checkpoint(output_path)
+
+    except KeyboardInterrupt:
+        print("\n⚠️  Training interrupted by user")
+        output_path = args.output or get_default_checkpoint_path()
+        print(f"💾 Saving checkpoint: {output_path}")
+        brain.save_checkpoint(output_path)
 
     finally:
         brain.stop()
