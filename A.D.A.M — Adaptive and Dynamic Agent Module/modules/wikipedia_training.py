@@ -18,10 +18,12 @@ import urllib.parse
 try:
     from core.brain_wrapper import VectLLMBrain
     from core.stats import StatsCollector
+    from core.pipeline import PipelinedTrainer
     from Utils.checkpoint import CheckpointManager
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
+    from ..core.pipeline import PipelinedTrainer
     from ..utils.checkpoint import CheckpointManager
 
 
@@ -474,13 +476,15 @@ class WikipediaStreamTrainer:
               max_articles: Optional[int] = None,
               passes_per_batch: int = 1,
               auto_save_every: int = 100,
-              verbose: bool = True) -> dict:
+              verbose: bool = True,
+              use_pipeline: bool = True,
+              prefetch_size: int = 3) -> dict:
         """
         Train continuously on Wikipedia articles.
 
         Ciclo:
         1. Scarica articoli fino a RAM target
-        2. Allena su articoli
+        2. Allena su articoli (pipelined per overlap CPU/GPU)
         3. Libera memoria
         4. Ripeti
 
@@ -489,6 +493,8 @@ class WikipediaStreamTrainer:
             passes_per_batch: Passate training per ogni batch
             auto_save_every: Auto-save ogni N articoli
             verbose: Stampa progress
+            use_pipeline: Usa training pipelinato per overlap CPU/GPU
+            prefetch_size: Numero batch da pre-caricare (se use_pipeline)
 
         Returns:
             Dict con statistiche finali
@@ -499,6 +505,9 @@ class WikipediaStreamTrainer:
             print(f"   Batch size: {self.fetcher.batch_size} articles")
             print(f"   Max articles: {max_articles or 'unlimited'}")
             print(f"   Passes per batch: {passes_per_batch}")
+            print(f"   Pipeline mode: {'enabled' if use_pipeline else 'disabled'}")
+            if use_pipeline:
+                print(f"   Prefetch size: {prefetch_size}")
             print()
 
         total_tokens = 0
@@ -535,45 +544,59 @@ class WikipediaStreamTrainer:
                     if verbose:
                         print(f"\n   📖 Pass {pass_num}/{passes_per_batch}")
 
-                    for i, (title, text) in enumerate(self.fetcher.iter_articles()):
-                        article_num = articles_processed + i + 1
-
-                        # Check limit
-                        if max_articles and article_num > max_articles:
-                            break
-
-                        # Train
-                        processed = self.brain.train_on_text(text, passes=1)
-                        batch_tokens += processed
-                        total_tokens += processed  # Update total immediately
-
-                        if pass_num == 1:
-                            articles_processed += 1
-
-                        # Progress update
-                        if verbose and i % 10 == 0:
-                            stats = self.brain.get_stats()
-                            print(f"      Article {i+1}/{fetched}: {title[:40]}...")
-                            print(f"      Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']}")
-
-                        # Auto-save
-                        if article_num % auto_save_every == 0:
-                            ckpt_name = f"wiki_stream_{article_num}.ckpt"
-                            ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
-
-                            if verbose:
-                                print(f"      💾 Auto-saving: {ckpt_name}")
-
-                            self.brain.save_checkpoint(str(ckpt_path))
-
-                        # Update stats after each article for accurate interrupt reporting
-                        brain_stats = self.brain.get_stats()
-                        self.stats.update(
-                            cycles=brain_stats['cycles'],
-                            tokens=brain_stats['tokens'],
-                            loss=brain_stats['loss'],
-                            vocab_size=brain_stats['vocab_words']
+                    if use_pipeline:
+                        # Pipelined training - overlap CPU encoding with GPU training
+                        batch_tokens += self._train_batch_pipelined(
+                            fetched, pass_num, max_articles, articles_processed,
+                            auto_save_every, verbose, prefetch_size
                         )
+                        if pass_num == 1:
+                            articles_processed += fetched
+                            if max_articles:
+                                articles_processed = min(articles_processed, max_articles)
+                    else:
+                        # Sequential training (legacy)
+                        for i, (title, text) in enumerate(self.fetcher.iter_articles()):
+                            article_num = articles_processed + i + 1
+
+                            # Check limit
+                            if max_articles and article_num > max_articles:
+                                break
+
+                            # Train
+                            processed = self.brain.train_on_text(text, passes=1)
+                            batch_tokens += processed
+                            total_tokens += processed  # Update total immediately
+
+                            if pass_num == 1:
+                                articles_processed += 1
+
+                            # Progress update
+                            if verbose and i % 10 == 0:
+                                stats = self.brain.get_stats()
+                                print(f"      Article {i+1}/{fetched}: {title[:40]}...")
+                                print(f"      Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']}")
+
+                            # Auto-save
+                            if article_num % auto_save_every == 0:
+                                ckpt_name = f"wiki_stream_{article_num}.ckpt"
+                                ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
+
+                                if verbose:
+                                    print(f"      💾 Auto-saving: {ckpt_name}")
+
+                                self.brain.save_checkpoint(str(ckpt_path))
+
+                            # Update stats after each article for accurate interrupt reporting
+                            brain_stats = self.brain.get_stats()
+                            self.stats.update(
+                                cycles=brain_stats['cycles'],
+                                tokens=brain_stats['tokens'],
+                                loss=brain_stats['loss'],
+                                vocab_size=brain_stats['vocab_words']
+                            )
+
+                total_tokens += batch_tokens
                 batch_time = time.time() - batch_start
 
                 # Get latest stats for display
@@ -605,12 +628,102 @@ class WikipediaStreamTrainer:
             print(f"Articles: {articles_processed}")
             print(f"Tokens: {total_tokens:,}")
             print(f"Time: {elapsed/60:.1f} minutes")
-            print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
+            if elapsed > 0:
+                print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
             print(f"Loss: {final_stats['loss']:.4f}")
             print(f"Vocab: {final_stats['vocab_size']:,} words")
             print()
 
         return final_stats
+
+    def _train_batch_pipelined(self,
+                                fetched: int,
+                                pass_num: int,
+                                max_articles: Optional[int],
+                                articles_processed: int,
+                                auto_save_every: int,
+                                verbose: bool,
+                                prefetch_size: int) -> int:
+        """
+        Train on batch using pipelined CPU/GPU overlap.
+
+        Args:
+            fetched: Number of articles fetched
+            pass_num: Current pass number
+            max_articles: Max articles limit
+            articles_processed: Articles processed so far
+            auto_save_every: Auto-save interval
+            verbose: Verbose output
+            prefetch_size: Prefetch queue size
+
+        Returns:
+            Tokens processed in this batch
+        """
+        # Create pipelined trainer
+        trainer = PipelinedTrainer(self.brain, prefetch_size=prefetch_size)
+
+        # Collect texts from fetcher
+        texts = []
+        article_info = []  # Store (title, article_num) for progress tracking
+
+        for i, (title, text) in enumerate(self.fetcher.iter_articles()):
+            article_num = articles_processed + i + 1
+
+            # Check limit
+            if max_articles and article_num > max_articles:
+                break
+
+            texts.append(text)
+            article_info.append((title, article_num))
+
+        if not texts:
+            return 0
+
+        # Progress callback
+        processed_count = [0]  # Use list for closure
+        last_save_article = [articles_processed]
+
+        def progress_callback(batch_num: int, tokens: int):
+            processed_count[0] += 1
+            idx = min(processed_count[0] - 1, len(article_info) - 1)
+            title, article_num = article_info[idx]
+
+            # Progress update
+            if verbose and processed_count[0] % 10 == 0:
+                stats = self.brain.get_stats()
+                print(f"      Article {processed_count[0]}/{len(texts)}: {title[:40]}...")
+                print(f"      Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']}")
+
+            # Auto-save check
+            if article_num % auto_save_every == 0 and article_num > last_save_article[0]:
+                last_save_article[0] = article_num
+                ckpt_name = f"wiki_stream_{article_num}.ckpt"
+                ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
+
+                if verbose:
+                    print(f"      💾 Auto-saving: {ckpt_name}")
+
+                self.brain.save_checkpoint(str(ckpt_path))
+
+            # Update stats
+            brain_stats = self.brain.get_stats()
+            self.stats.update(
+                cycles=brain_stats['cycles'],
+                tokens=brain_stats['tokens'],
+                loss=brain_stats['loss'],
+                vocab_size=brain_stats['vocab_words']
+            )
+
+        # Run pipelined training
+        batch_tokens = trainer.train_texts(iter(texts), progress_callback)
+
+        # Get pipeline stats
+        pipeline_stats = trainer.get_stats()
+        if verbose and pass_num == 1:
+            print(f"      Pipeline stats: {pipeline_stats['throughput_tok_s']:.0f} tok/s, "
+                  f"avg batch: {pipeline_stats['avg_tokens_per_batch']:.0f} tokens")
+
+        return batch_tokens
 
 
 # ============================================================================

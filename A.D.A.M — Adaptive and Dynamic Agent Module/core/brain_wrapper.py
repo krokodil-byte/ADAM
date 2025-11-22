@@ -16,6 +16,7 @@ from typing import Optional, List, Dict
 
 from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG
 from .vocabulary import DynamicVocabulary
+from .pipeline import AsyncBatchLoader, PipelinedTrainer, BatchData
 
 
 class CUDACompiler:
@@ -478,9 +479,41 @@ class VectLLMBrain:
             processed = self.feed_training_batch(tokens)
             if processed > 0:
                 total_processed += processed
-        
+
         return total_processed
-    
+
+    def create_pipelined_trainer(self, prefetch_size: int = 3) -> PipelinedTrainer:
+        """
+        Crea trainer pipelinato per overlap CPU/GPU.
+
+        Args:
+            prefetch_size: Numero batch da pre-caricare
+
+        Returns:
+            PipelinedTrainer configurato
+        """
+        return PipelinedTrainer(self, prefetch_size=prefetch_size)
+
+    def train_on_texts_pipelined(self,
+                                  texts,
+                                  callback=None,
+                                  prefetch_size: int = 3) -> int:
+        """
+        Training pipelinato su stream di testi.
+        CPU prepara batch mentre GPU processa.
+
+        Args:
+            texts: Iterator o lista di testi
+            callback: Callback(batch_num, tokens) per progress
+            prefetch_size: Numero batch da pre-caricare
+
+        Returns:
+            Totale token processati
+        """
+        trainer = self.create_pipelined_trainer(prefetch_size)
+        total_tokens = trainer.train_texts(iter(texts), callback)
+        return total_tokens
+
     def get_stats(self) -> Dict:
         """Ottieni statistiche del sistema"""
         cycles = ctypes.c_longlong()

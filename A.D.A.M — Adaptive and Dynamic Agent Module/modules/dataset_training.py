@@ -20,10 +20,12 @@ import time
 try:
     from core.brain_wrapper import VectLLMBrain
     from core.stats import StatsCollector
+    from core.pipeline import PipelinedTrainer
     from Utils.checkpoint import CheckpointManager
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
+    from ..core.pipeline import PipelinedTrainer
     from ..utils.checkpoint import CheckpointManager
 
 # Try to import pyarrow for Parquet support
@@ -389,7 +391,9 @@ class HFDatasetTrainer:
     def train(self,
               passes: int = 1,
               auto_save_every: int = 1000,
-              verbose: bool = True) -> Dict:
+              verbose: bool = True,
+              use_pipeline: bool = True,
+              prefetch_size: int = 3) -> Dict:
         """
         Train on HuggingFace dataset.
 
@@ -397,6 +401,8 @@ class HFDatasetTrainer:
             passes: Number of training passes
             auto_save_every: Auto-save every N samples
             verbose: Print progress
+            use_pipeline: Use pipelined training for CPU/GPU overlap
+            prefetch_size: Number of batches to prefetch (if use_pipeline)
 
         Returns:
             Final statistics
@@ -409,6 +415,7 @@ class HFDatasetTrainer:
             print(f"   Format: {dataset_stats['format']}")
             print(f"   Avg length: {dataset_stats['avg_sample_length']:.0f} chars")
             print(f"   Passes: {passes}")
+            print(f"   Pipeline mode: {'enabled' if use_pipeline else 'disabled'}")
             print()
 
         total_tokens = 0
@@ -423,42 +430,52 @@ class HFDatasetTrainer:
                 pass_start = time.time()
                 pass_tokens = 0
 
-                for idx, text in self.loader.iter_samples():
-                    # Train on sample
-                    processed = self.brain.train_on_text(text, passes=1)
-                    pass_tokens += processed
-                    total_tokens += processed
-
-                    if pass_num == 1:
-                        samples_processed += 1
-
-                    # Progress update
-                    if verbose and (idx + 1) % 100 == 0:
-                        brain_stats = self.brain.get_stats()
-                        elapsed = time.time() - pass_start
-                        speed = pass_tokens / elapsed if elapsed > 0 else 0
-                        print(f"   Sample {idx + 1}/{dataset_stats['num_samples']}: "
-                              f"Loss={brain_stats['loss']:.4f}, "
-                              f"Vocab={brain_stats['vocab_words']}, "
-                              f"Speed={speed:.0f} tok/s")
-
-                    # Auto-save
-                    if (idx + 1) % auto_save_every == 0:
-                        ckpt_name = f"hf_pass{pass_num}_sample{idx + 1}.ckpt"
-                        ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
-                        if verbose:
-                            print(f"   💾 Auto-saving: {ckpt_name}")
-                        self.brain.save_checkpoint(str(ckpt_path))
-
-                    # Update stats
-                    brain_stats = self.brain.get_stats()
-                    self.stats.update(
-                        cycles=brain_stats['cycles'],
-                        tokens=brain_stats['tokens'],
-                        loss=brain_stats['loss'],
-                        vocab_size=brain_stats['vocab_words']
+                if use_pipeline:
+                    # Pipelined training - overlap CPU encoding with GPU training
+                    pass_tokens = self._train_pass_pipelined(
+                        pass_num, dataset_stats, auto_save_every, verbose, prefetch_size
                     )
+                    if pass_num == 1:
+                        samples_processed = dataset_stats['num_samples']
+                else:
+                    # Sequential training (legacy)
+                    for idx, text in self.loader.iter_samples():
+                        # Train on sample
+                        processed = self.brain.train_on_text(text, passes=1)
+                        pass_tokens += processed
+                        total_tokens += processed
 
+                        if pass_num == 1:
+                            samples_processed += 1
+
+                        # Progress update
+                        if verbose and (idx + 1) % 100 == 0:
+                            brain_stats = self.brain.get_stats()
+                            elapsed = time.time() - pass_start
+                            speed = pass_tokens / elapsed if elapsed > 0 else 0
+                            print(f"   Sample {idx + 1}/{dataset_stats['num_samples']}: "
+                                  f"Loss={brain_stats['loss']:.4f}, "
+                                  f"Vocab={brain_stats['vocab_words']}, "
+                                  f"Speed={speed:.0f} tok/s")
+
+                        # Auto-save
+                        if (idx + 1) % auto_save_every == 0:
+                            ckpt_name = f"hf_pass{pass_num}_sample{idx + 1}.ckpt"
+                            ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
+                            if verbose:
+                                print(f"   💾 Auto-saving: {ckpt_name}")
+                            self.brain.save_checkpoint(str(ckpt_path))
+
+                        # Update stats
+                        brain_stats = self.brain.get_stats()
+                        self.stats.update(
+                            cycles=brain_stats['cycles'],
+                            tokens=brain_stats['tokens'],
+                            loss=brain_stats['loss'],
+                            vocab_size=brain_stats['vocab_words']
+                        )
+
+                total_tokens += pass_tokens
                 pass_time = time.time() - pass_start
                 if verbose:
                     print(f"\n   ✅ Pass {pass_num} complete: {pass_tokens:,} tokens in {pass_time/60:.1f}m")
@@ -477,12 +494,89 @@ class HFDatasetTrainer:
             print(f"Samples: {samples_processed}")
             print(f"Tokens: {total_tokens:,}")
             print(f"Time: {elapsed/60:.1f} minutes")
-            print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
+            if elapsed > 0:
+                print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
             print(f"Loss: {final_stats['loss']:.4f}")
             print(f"Vocab: {final_stats['vocab_size']:,} words")
             print()
 
         return final_stats
+
+    def _train_pass_pipelined(self,
+                               pass_num: int,
+                               dataset_stats: Dict,
+                               auto_save_every: int,
+                               verbose: bool,
+                               prefetch_size: int) -> int:
+        """
+        Train one pass using pipelined CPU/GPU overlap.
+
+        Args:
+            pass_num: Current pass number
+            dataset_stats: Dataset statistics
+            auto_save_every: Auto-save interval
+            verbose: Verbose output
+            prefetch_size: Prefetch queue size
+
+        Returns:
+            Tokens processed in this pass
+        """
+        # Create pipelined trainer
+        trainer = PipelinedTrainer(self.brain, prefetch_size=prefetch_size)
+
+        # Collect all samples
+        texts = [text for _, text in self.loader.iter_samples()]
+
+        if not texts:
+            return 0
+
+        # Progress callback
+        processed_count = [0]
+        last_save_idx = [0]
+        pass_start = time.time()
+
+        def progress_callback(batch_num: int, tokens: int):
+            processed_count[0] += 1
+            idx = processed_count[0]
+
+            # Progress update
+            if verbose and idx % 100 == 0:
+                brain_stats = self.brain.get_stats()
+                elapsed = time.time() - pass_start
+                speed = tokens / elapsed if elapsed > 0 else 0
+                print(f"   Sample {idx}/{dataset_stats['num_samples']}: "
+                      f"Loss={brain_stats['loss']:.4f}, "
+                      f"Vocab={brain_stats['vocab_words']}, "
+                      f"Speed={speed:.0f} tok/s")
+
+            # Auto-save check
+            if idx % auto_save_every == 0 and idx > last_save_idx[0]:
+                last_save_idx[0] = idx
+                ckpt_name = f"hf_pass{pass_num}_sample{idx}.ckpt"
+                ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
+                if verbose:
+                    print(f"   💾 Auto-saving: {ckpt_name}")
+                self.brain.save_checkpoint(str(ckpt_path))
+
+            # Update stats
+            brain_stats = self.brain.get_stats()
+            self.stats.update(
+                cycles=brain_stats['cycles'],
+                tokens=brain_stats['tokens'],
+                loss=brain_stats['loss'],
+                vocab_size=brain_stats['vocab_words']
+            )
+
+        # Run pipelined training
+        pass_tokens = trainer.train_texts(iter(texts), progress_callback)
+
+        # Get pipeline stats
+        pipeline_stats = trainer.get_stats()
+        if verbose:
+            print(f"   Pipeline stats: {pipeline_stats['throughput_tok_s']:.0f} tok/s, "
+                  f"avg batch: {pipeline_stats['avg_tokens_per_batch']:.0f} tokens")
+
+        return pass_tokens
 
 
 class DatasetTrainer:

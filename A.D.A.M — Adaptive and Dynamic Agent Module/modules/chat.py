@@ -5,31 +5,99 @@ Modalità chat interattiva con VectLLM
 """
 
 import sys
+import threading
+import queue
 from typing import Optional, List
 
 # Handle imports for both installed package and direct execution
 try:
     from core.brain_wrapper import VectLLMBrain
     from core.stats import StatsCollector
+    from core.pipeline import AsyncBatchLoader
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
+    from ..core.pipeline import AsyncBatchLoader
 
 
 class InteractiveChat:
     """Chat interattiva con il modello"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  brain: VectLLMBrain,
-                 stats_collector: Optional[StatsCollector] = None):
+                 stats_collector: Optional[StatsCollector] = None,
+                 async_training: bool = True):
         """
         Args:
             brain: Istanza VectLLMBrain
             stats_collector: Collector statistiche (opzionale)
+            async_training: Usa training asincrono in background
         """
         self.brain = brain
         self.stats = stats_collector or StatsCollector()
         self.history: List[str] = []
+
+        # Async background training
+        self.async_training = async_training
+        self.training_queue: queue.Queue = queue.Queue()
+        self.training_thread: Optional[threading.Thread] = None
+        self.training_running = False
+        self.pending_training = 0  # Count of messages being trained
+
+    def _start_background_training(self):
+        """Start background training thread"""
+        if self.training_running:
+            return
+
+        self.training_running = True
+        self.training_thread = threading.Thread(target=self._training_worker, daemon=True)
+        self.training_thread.start()
+
+    def _stop_background_training(self):
+        """Stop background training thread"""
+        self.training_running = False
+        self.training_queue.put(None)  # Signal stop
+
+        if self.training_thread:
+            self.training_thread.join(timeout=2.0)
+
+    def _training_worker(self):
+        """Background thread for async training"""
+        while self.training_running:
+            try:
+                text = self.training_queue.get(timeout=0.1)
+
+                if text is None:
+                    break
+
+                # Train on text
+                self.brain.train_on_text(text, passes=1)
+                self.pending_training = max(0, self.pending_training - 1)
+
+                # Update stats
+                brain_stats = self.brain.get_stats()
+                self.stats.update(
+                    cycles=brain_stats['cycles'],
+                    tokens=brain_stats['tokens'],
+                    loss=brain_stats['loss'],
+                    vocab_size=brain_stats['vocab_words']
+                )
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"\n⚠️  Background training error: {e}")
+                self.pending_training = max(0, self.pending_training - 1)
+                continue
+
+    def _queue_training(self, text: str):
+        """Queue text for background training"""
+        if self.async_training:
+            self.pending_training += 1
+            self.training_queue.put(text)
+        else:
+            # Synchronous training
+            self.brain.train_on_text(text, passes=1)
         
     def start(self):
         """Avvia sessione chat interattiva"""
@@ -45,32 +113,48 @@ class InteractiveChat:
         print("  /quit     - Exit chat")
         print()
         print("Type your message and press Enter")
+        if self.async_training:
+            print("(Background training enabled)")
         print("=" * 70)
         print()
-        
-        while True:
-            try:
-                # Get user input
-                user_input = input("You> ").strip()
-                
-                if not user_input:
-                    continue
-                
-                # Handle commands
-                if user_input.startswith('/'):
-                    if self._handle_command(user_input):
-                        break  # Exit if quit command
-                    continue
-                
-                # Process user input
-                self._process_message(user_input)
-                
-            except KeyboardInterrupt:
-                print("\n\n👋 Chat interrupted")
-                break
-            except EOFError:
-                print("\n\n👋 Chat ended")
-                break
+
+        # Start background training if enabled
+        if self.async_training:
+            self._start_background_training()
+
+        try:
+            while True:
+                try:
+                    # Show pending training indicator
+                    prompt = "You> "
+                    if self.pending_training > 0:
+                        prompt = f"You ({self.pending_training} training)> "
+
+                    # Get user input
+                    user_input = input(prompt).strip()
+
+                    if not user_input:
+                        continue
+
+                    # Handle commands
+                    if user_input.startswith('/'):
+                        if self._handle_command(user_input):
+                            break  # Exit if quit command
+                        continue
+
+                    # Process user input
+                    self._process_message(user_input)
+
+                except KeyboardInterrupt:
+                    print("\n\n👋 Chat interrupted")
+                    break
+                except EOFError:
+                    print("\n\n👋 Chat ended")
+                    break
+        finally:
+            # Stop background training
+            if self.async_training:
+                self._stop_background_training()
     
     def _handle_command(self, command: str) -> bool:
         """
@@ -109,32 +193,32 @@ class InteractiveChat:
     def _process_message(self, message: str):
         """
         Processa messaggio utente e genera risposta.
-        
+
         Args:
             message: Messaggio utente
         """
         # Add to history
         self.history.append(f"User: {message}")
-        
-        # Train on user message
-        self.brain.train_on_text(message, passes=1)
-        
-        # TODO: Implement actual generation
-        # For now, just acknowledge
+
+        # Queue message for background training (non-blocking)
+        self._queue_training(message)
+
+        # Generate response (happens immediately while training runs in background)
         response = self._generate_response(message)
-        
+
         self.history.append(f"Bot: {response}")
         print(f"Bot> {response}")
         print()
-        
-        # Update stats
-        brain_stats = self.brain.get_stats()
-        self.stats.update(
-            cycles=brain_stats['cycles'],
-            tokens=brain_stats['tokens'],
-            loss=brain_stats['loss'],
-            vocab_size=brain_stats['vocab_words']
-        )
+
+        # Update stats (may not reflect latest training if async)
+        if not self.async_training:
+            brain_stats = self.brain.get_stats()
+            self.stats.update(
+                cycles=brain_stats['cycles'],
+                tokens=brain_stats['tokens'],
+                loss=brain_stats['loss'],
+                vocab_size=brain_stats['vocab_words']
+            )
     
     def _generate_response(self, user_message: str) -> str:
         """
