@@ -13,11 +13,11 @@ from typing import Any, Dict, List, Optional
 # Handle imports
 try:
     from core.config import (
-        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG
+        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG, PERFORMANCE_CONFIG
     )
 except ImportError:
     from ..core.config import (
-        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG
+        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG, PERFORMANCE_CONFIG
     )
 
 
@@ -88,9 +88,23 @@ class ADAMTUI:
                 'items': [
                     ('model', '🏗️  Model Architecture', 'Layers, dimensions, heads'),
                     ('training', '📈 Training Parameters', 'Learning rate, momentum'),
+                    ('performance', '⚡ Performance', 'GPU optimizations, pipeline, kernels'),
                     ('system', '🖥️  System', 'CUDA, checkpoints'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'performance': {
+                'title': 'Performance Settings',
+                'items': [
+                    ('use_cublas', '🔢 Use cuBLAS', 'Enable cuBLAS for matrix operations'),
+                    ('use_fused', '🧩 Fused Kernels', 'Enable fused attention+FFN kernels'),
+                    ('pipeline', '🔀 Pipeline Mode', 'H2D/compute/D2H overlap'),
+                    ('async', '⚡ Async Transfers', 'Asynchronous memory transfers'),
+                    ('pinned', '📌 Pinned Memory', 'Use pinned host memory'),
+                    ('warp', '🔄 Warp Primitives', 'Use warp-level shuffle operations'),
+                    ('target', '🎯 GPU Target', 'Target GPU utilization %'),
+                    ('back', '← Back', 'Return to settings'),
                 ]
             },
         }
@@ -112,6 +126,15 @@ class ADAMTUI:
                 'base_lr': TRAINING_CONFIG.BASE_LR,
                 'momentum': TRAINING_CONFIG.MOMENTUM,
                 'temperature': TRAINING_CONFIG.EXPLORATION_TEMPERATURE,
+            },
+            'performance': {
+                'use_cublas': PERFORMANCE_CONFIG.USE_CUBLAS,
+                'use_fused': PERFORMANCE_CONFIG.USE_FUSED_KERNELS,
+                'pipeline': PERFORMANCE_CONFIG.PIPELINE_MODE,
+                'async': PERFORMANCE_CONFIG.ASYNC_TRANSFERS,
+                'pinned': PERFORMANCE_CONFIG.USE_PINNED_MEMORY,
+                'warp': PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES,
+                'target': PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET,
             },
             'system': {
                 'device_id': RUNTIME_CONFIG.DEVICE_ID,

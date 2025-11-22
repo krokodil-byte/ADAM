@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-VectLLM Command Line Interface
-Unified CLI for all VectLLM operations
+A.D.A.M Command Line Interface
+Unified CLI for all A.D.A.M operations
+
+Usage:
+    adam              - Open TUI dashboard
+    adam train ...    - Train on text
+    adam chat ...     - Interactive chat
+    adam stats ...    - View statistics
 """
 
 import sys
@@ -485,11 +491,11 @@ def cmd_settings(args):
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
-        prog='vectllm',
-        description='VectLLM - Continuous Self-Training Language Model',
-        epilog='Use "vectllm <command> --help" for more info on a command'
+        prog='adam',
+        description='A.D.A.M - Adaptive and Dynamic Agent Module',
+        epilog='Run "adam" without arguments to open the TUI dashboard'
     )
-    
+
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
     # INIT command
@@ -503,7 +509,7 @@ def main():
     parser_train.add_argument('-v', '--vocab', help='Vocabulary file')
     parser_train.add_argument('-p', '--passes', type=int, default=1, 
                              help='Number of training passes (default: 1)')
-    parser_train.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'inference', 'research'],
+    parser_train.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'inference', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
                              help='Config preset')
     parser_train.add_argument('--auto-save', type=int, metavar='N',
                              help='Auto-save checkpoint every N passes')
@@ -540,7 +546,7 @@ def main():
     parser_dataset.add_argument('-c', '--checkpoint', help='Load from checkpoint')
     parser_dataset.add_argument('-p', '--passes', type=int, default=1,
                                help='Number of passes (default: 1)')
-    parser_dataset.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research'],
+    parser_dataset.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
                                help='Config preset')
     parser_dataset.add_argument('--auto-save', type=int, metavar='N',
                                help='Auto-save every N files')
@@ -559,23 +565,23 @@ def main():
                             help='Maximum number of articles to process')
     parser_wiki.add_argument('--auto-save', type=int,
                             help='Auto-save every N articles')
-    parser_wiki.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research'],
+    parser_wiki.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
                             help='Config preset')
     parser_wiki.add_argument('--language', type=str, default='en',
                             help='Wikipedia language code (default: en)')
     parser_wiki.add_argument('--batch-size', type=int, default=100,
                             help='Number of articles per batch (default: 100)')
 
-    # SETTINGS/TUI command
-    parser_settings = subparsers.add_parser('settings', help='Open A.D.A.M TUI (graphical interface)')
+    # DASHBOARD/TUI command (alias for running without args)
+    parser_dashboard = subparsers.add_parser('dashboard', help='Open A.D.A.M TUI dashboard')
 
     # Parse arguments
     args = parser.parse_args()
-    
+
+    # If no command, open TUI dashboard
     if not args.command:
-        parser.print_help()
-        return 1
-    
+        return cmd_settings(args)
+
     # Execute command
     commands = {
         'init': cmd_init,
@@ -587,7 +593,7 @@ def main():
         'chat': cmd_chat,
         'dataset': cmd_dataset,
         'wikipedia': cmd_wikipedia,
-        'settings': cmd_settings,
+        'dashboard': cmd_settings,
     }
     
     try:
