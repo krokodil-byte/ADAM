@@ -42,7 +42,7 @@ setup(
     # Entry points
     entry_points={
         "console_scripts": [
-            "vectllm=cli.vectllm:main",
+            "adam=cli.adam:main",
         ],
     },
 
