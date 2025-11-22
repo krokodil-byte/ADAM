@@ -1,0 +1,1860 @@
+
+// VectLLM Unified CUDA Kernel - Embedded Version
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <curand.h>
+#include <curand_kernel.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+
+#define MAX_SEQ_LEN 512
+#define CHAR_VOCAB_SIZE 256
+#define MAX_WORD_VOCAB_SIZE 100000
+#define TOTAL_VOCAB_SIZE (CHAR_VOCAB_SIZE + MAX_WORD_VOCAB_SIZE)
+#define EMBED_DIM 768
+#define NUM_HEADS 12
+#define NUM_LAYERS 6
+#define VENN_CLUSTERS 256
+#define EPISODIC_BUFFER_SIZE 1024
+
+typedef enum {
+    MODE_EXTERNAL_INPUT = 0,
+    MODE_SELF_LOOP = 1,
+    MODE_EPISODIC_QUERY = 2
+} OperationMode;
+
+typedef struct {
+    float* cluster_centers;
+    int* token_memberships;
+    float* membership_weights;
+    float* intersection_matrix;
+    
+    // NUOVO: buffer per k-means online
+    float* cluster_sums;      // [VENN_CLUSTERS x EMBED_DIM]
+    float* cluster_counts;    // [VENN_CLUSTERS]
+} VennSemanticSystem;
+
+typedef struct {
+    float* episode_embeddings;
+    float* rewards;
+    int write_index;
+    int total_episodes;
+    float avg_reward;
+} EpisodicMemory;
+
+typedef struct {
+    int device_id;
+    size_t allocated_memory;
+    cudaStream_t main_stream;
+    cudaStream_t venn_stream;
+    cublasHandle_t cublas_handle;
+} GPUResources;
+
+typedef struct {
+    // Model parameters - DUAL EMBEDDINGS
+    float* char_embeddings;       // [CHAR_VOCAB_SIZE x EMBED_DIM] - FISSO
+    float* word_embeddings;       // [MAX_WORD_VOCAB_SIZE x EMBED_DIM] - DINAMICO
+    int* word_valid_mask;         // [MAX_WORD_VOCAB_SIZE] - 1 se word_id valido, 0 altrimenti
+    int current_word_vocab_size;  // Numero di word tokens attualmente in uso
+    
+    float* pos_embeddings;
+    float* qkv_weights;
+    float* ffn_w1;
+    float* ffn_w2;
+    float* output_weights;        // [TOTAL_VOCAB_SIZE x EMBED_DIM] - output per tutti i token
+    
+    // Gradient buffers - DUAL
+    float* grad_char_embeddings;  // [CHAR_VOCAB_SIZE x EMBED_DIM]
+    float* grad_word_embeddings;  // [MAX_WORD_VOCAB_SIZE x EMBED_DIM]
+    float* grad_hidden_states;
+    float* grad_output_weights;
+    
+    // Momentum buffers - DUAL
+    float* momentum_char_emb;     // [CHAR_VOCAB_SIZE x EMBED_DIM]
+    float* momentum_word_emb;     // [MAX_WORD_VOCAB_SIZE x EMBED_DIM]
+    float* momentum_output;
+    
+    // Forward pass buffers
+    float* hidden_states;
+    float* attention_output;
+    float* logits;
+    
+    // Semantic navigation
+    float* semantic_state;
+    float* cluster_activations;
+    
+    // Input/output
+    int* current_sequence;
+    int seq_len;
+    
+    // Training parameters
+    float learning_rate;
+    float exploration_temperature;
+    float momentum;
+    unsigned long long random_seed;
+    
+    // Loss tracking
+    float current_loss;
+} LLMCore;
+
+typedef struct {
+    GPUResources gpu;
+    LLMCore llm;
+    VennSemanticSystem venn;
+    EpisodicMemory episodic;
+    OperationMode current_mode;
+    pthread_t background_thread;
+    int running;
+    long long total_tokens_processed;
+    long long self_training_cycles;
+    float current_perplexity;
+    
+    // Checkpoint metadata
+    char checkpoint_path[512];
+    int checkpoint_version;
+    time_t last_checkpoint_time;
+} UnifiedVectorLLM;
+
+// Checkpoint header structure
+typedef struct {
+    char magic[8];           // "VECTLLM3" (versione 3 con vocab dinamico)
+    int version;
+    int char_vocab_size;
+    int current_word_vocab_size;  // NUOVO: numero parole attive
+    int max_word_vocab_size;      // NUOVO: capacità massima
+    int embed_dim;
+    int num_layers;
+    int num_heads;
+    int num_clusters;
+    long long total_cycles;
+    long long total_tokens;
+    time_t timestamp;
+    float current_loss;
+    float learning_rate;
+    float momentum;
+} CheckpointHeader;
+
+// ============================================================================
+// FORWARD PASS - Neural Network Core
+// ============================================================================
+
+// A) Embedding Lookup + Positional Encoding (DUAL EMBEDDINGS)
+__global__ void embedding_forward_kernel(
+    const float* char_embeddings,    // [CHAR_VOCAB_SIZE x EMBED_DIM]
+    const float* word_embeddings,    // [MAX_WORD_VOCAB_SIZE x EMBED_DIM]
+    const int* word_valid_mask,      // [MAX_WORD_VOCAB_SIZE]
+    const float* pos_embeddings,
+    const int* tokens,
+    float* hidden_states,
+    int seq_len,
+    int embed_dim
+) {
+    int pos = blockIdx.x;
+    int dim = threadIdx.x;
+    
+    if (pos >= seq_len || dim >= embed_dim) return;
+    
+    int token = tokens[pos];
+    float emb = 0.0f;
+    
+    // Dual embedding lookup
+    if (token < CHAR_VOCAB_SIZE) {
+        // Character embedding (0-255)
+        emb = char_embeddings[token * embed_dim + dim];
+    } else {
+        // Word embedding (256+)
+        int word_idx = token - CHAR_VOCAB_SIZE;
+        
+        if (word_idx >= 0 && word_idx < MAX_WORD_VOCAB_SIZE) {
+            // Check if word is valid
+            if (word_valid_mask[word_idx] == 1) {
+                emb = word_embeddings[word_idx * embed_dim + dim];
+            } else {
+                // Invalid word token - fallback to zero
+                emb = 0.0f;
+            }
+        }
+    }
+    
+    // Positional encoding
+    float pos_emb = (pos < MAX_SEQ_LEN) ? pos_embeddings[pos * embed_dim + dim] : 0.0f;
+    
+    hidden_states[pos * embed_dim + dim] = emb + pos_emb;
+}
+
+// B) Simplified Multi-Head Attention (single layer)
+__global__ void attention_forward_kernel(
+    const float* input,
+    const float* qkv_weights,
+    float* output,
+    int seq_len,
+    int embed_dim,
+    int num_heads
+) {
+    int pos = blockIdx.x;
+    int head = blockIdx.y;
+    int dim_per_head = embed_dim / num_heads;
+    
+    if (pos >= seq_len || head >= num_heads) return;
+    
+    // Simplified: skip actual Q,K,V matmul for now
+    // Just copy with residual (identity-like)
+    for (int d = 0; d < dim_per_head; d++) {
+        int idx = pos * embed_dim + head * dim_per_head + d;
+        output[idx] = input[idx] * 0.9f; // Placeholder attention
+    }
+}
+
+// C) Feed-Forward Network (2-layer MLP)
+__global__ void ffn_forward_kernel(
+    const float* input,
+    const float* w1,
+    const float* w2,
+    float* output,
+    int seq_len,
+    int embed_dim
+) {
+    int pos = blockIdx.x;
+    int dim = threadIdx.x;
+    
+    if (pos >= seq_len || dim >= embed_dim) return;
+    
+    // Simplified FFN: output = input + ReLU(input * w1) * w2
+    float x = input[pos * embed_dim + dim];
+    float activated = fmaxf(0.0f, x * 0.1f); // Simplified weight
+    output[pos * embed_dim + dim] = x + activated * 0.1f; // Residual
+}
+
+// D) Output Projection → Logits (TUTTI i token: char + word)
+__global__ void output_projection_kernel(
+    const float* hidden_states,
+    const float* output_weights,
+    float* logits,
+    int seq_len,
+    int embed_dim,
+    int total_vocab_size
+) {
+    int pos = blockIdx.x;
+    int vocab_idx = blockIdx.y * blockDim.x + threadIdx.x;
+    
+    if (pos >= seq_len || vocab_idx >= total_vocab_size) return;
+    
+    // Matmul: logits[pos, vocab] = hidden[pos] · W_out[vocab]
+    float sum = 0.0f;
+    for (int d = 0; d < embed_dim; d++) {
+        sum += hidden_states[pos * embed_dim + d] * 
+               output_weights[vocab_idx * embed_dim + d];
+    }
+    logits[pos * total_vocab_size + vocab_idx] = sum;
+}
+
+// ============================================================================
+// LOSS COMPUTATION
+// ============================================================================
+
+// E) Cross-Entropy Loss
+__global__ void cross_entropy_loss_kernel(
+    const float* logits,
+    const int* targets,
+    float* loss_out,
+    int seq_len,
+    int total_vocab_size
+) {
+    int pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= seq_len - 1) return; // Predict next token
+    
+    int target = targets[pos + 1];
+    if (target < 0 || target >= total_vocab_size) return;
+    
+    // Softmax + log
+    float max_logit = -1e9f;
+    for (int v = 0; v < total_vocab_size; v++) {
+        float logit = logits[pos * total_vocab_size + v];
+        if (logit > max_logit) max_logit = logit;
+    }
+    
+    float sum_exp = 0.0f;
+    for (int v = 0; v < total_vocab_size; v++) {
+        sum_exp += expf(logits[pos * total_vocab_size + v] - max_logit);
+    }
+    
+    float log_prob = logits[pos * total_vocab_size + target] - max_logit - logf(sum_exp);
+    
+    // Negative log-likelihood
+    atomicAdd(loss_out, -log_prob / (seq_len - 1));
+}
+
+// ============================================================================
+// GRADIENT COMPUTATION (Simplified Backprop)
+// ============================================================================
+
+// F) Backward through output projection
+__global__ void output_projection_backward_kernel(
+    const float* logits,
+    const int* targets,
+    const float* hidden_states,
+    float* grad_output_weights,
+    float* grad_hidden,
+    int seq_len,
+    int embed_dim,
+    int total_vocab_size
+) {
+    int pos = blockIdx.x;
+    int vocab_idx = blockIdx.y * blockDim.x + threadIdx.x;
+    
+    if (pos >= seq_len - 1 || vocab_idx >= total_vocab_size) return;
+    
+    int target = targets[pos + 1];
+    
+    // Softmax gradient
+    float max_logit = -1e9f;
+    for (int v = 0; v < total_vocab_size; v++) {
+        float logit = logits[pos * total_vocab_size + v];
+        if (logit > max_logit) max_logit = logit;
+    }
+    
+    float sum_exp = 0.0f;
+    for (int v = 0; v < total_vocab_size; v++) {
+        sum_exp += expf(logits[pos * total_vocab_size + v] - max_logit);
+    }
+    
+    float prob = expf(logits[pos * total_vocab_size + vocab_idx] - max_logit) / sum_exp;
+    float grad = (vocab_idx == target) ? prob - 1.0f : prob;
+    grad /= (seq_len - 1);
+    
+    // Gradient w.r.t. output weights
+    for (int d = 0; d < embed_dim; d++) {
+        atomicAdd(&grad_output_weights[vocab_idx * embed_dim + d],
+                  grad * hidden_states[pos * embed_dim + d]);
+    }
+    
+    // Gradient w.r.t. hidden states (for backprop to embeddings)
+    if (vocab_idx == 0) {  // Only one thread per position does this
+        for (int d = 0; d < embed_dim; d++) {
+            float grad_h = 0.0f;
+            for (int v = 0; v < total_vocab_size; v++) {
+                float p = expf(logits[pos * total_vocab_size + v] - max_logit) / sum_exp;
+                float g = (v == target) ? p - 1.0f : p;
+                // This is simplified - full version needs W_out[v, d]
+                grad_h += g;  // Placeholder
+            }
+            grad_hidden[pos * embed_dim + d] = grad_h / (seq_len - 1);
+        }
+    }
+}
+
+// ============================================================================
+// WEIGHT UPDATE (SGD with momentum)
+// ============================================================================
+
+// G) SGD Update
+__global__ void sgd_update_kernel(
+    float* weights,
+    const float* gradients,
+    float* momentum_buffer,
+    float learning_rate,
+    float momentum,
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    // Momentum SGD: v = momentum * v - lr * grad
+    float grad = gradients[idx];
+    float v = momentum * momentum_buffer[idx] - learning_rate * grad;
+    momentum_buffer[idx] = v;
+    weights[idx] += v;
+}
+
+// H) Accumulate gradients for embeddings (DUAL)
+__global__ void embedding_backward_kernel(
+    const int* tokens,
+    const float* grad_hidden_states,
+    float* grad_char_embeddings,   // [CHAR_VOCAB_SIZE x EMBED_DIM]
+    float* grad_word_embeddings,   // [MAX_WORD_VOCAB_SIZE x EMBED_DIM]
+    int seq_len,
+    int embed_dim
+) {
+    int pos = blockIdx.x;
+    int dim = threadIdx.x;
+    
+    if (pos >= seq_len || dim >= embed_dim) return;
+    
+    int token = tokens[pos];
+    
+    if (token < CHAR_VOCAB_SIZE) {
+        // Character embedding gradient
+        atomicAdd(&grad_char_embeddings[token * embed_dim + dim],
+                  grad_hidden_states[pos * embed_dim + dim]);
+    } else {
+        // Word embedding gradient
+        int word_idx = token - CHAR_VOCAB_SIZE;
+        
+        if (word_idx >= 0 && word_idx < MAX_WORD_VOCAB_SIZE) {
+            atomicAdd(&grad_word_embeddings[word_idx * embed_dim + dim],
+                      grad_hidden_states[pos * embed_dim + dim]);
+        }
+    }
+}
+
+// ============================================================================
+// SEMANTIC EMBEDDING (unchanged - just renamed)
+// ============================================================================
+
+__global__ void extract_semantic_embedding_kernel(
+    const float* hidden_states,
+    float* semantic_state,
+    int seq_len,
+    int embed_dim
+) {
+    int dim = blockIdx.x * blockDim.x + threadIdx.x;
+    if (dim >= embed_dim) return;
+    
+    // Average pooling over sequence
+    float sum = 0.0f;
+    for (int i = 0; i < seq_len; i++) {
+        sum += hidden_states[i * embed_dim + dim];
+    }
+    semantic_state[dim] = sum / (float)seq_len;
+}
+
+__global__ void navigate_venn_space_kernel(
+    const float* semantic_state,
+    const float* cluster_centers,
+    const float* intersection_matrix,
+    float* cluster_activations,
+    int embed_dim,
+    int num_clusters,
+    float temperature
+) {
+    int cluster_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cluster_id >= num_clusters) return;
+    
+    // PHASE 1: Compute direct activation from semantic state
+    float dist_squared = 0.0f;
+    for (int d = 0; d < embed_dim; d++) {
+        float diff = semantic_state[d] - cluster_centers[cluster_id * embed_dim + d];
+        dist_squared += diff * diff;
+    }
+    
+    // Gaussian activation (higher temperature = broader activation)
+    float direct_activation = expf(-dist_squared / (temperature * temperature));
+    
+    // PHASE 2: Semantic propagation via intersection matrix
+    // Clusters that are semantically similar should co-activate
+    float propagated_activation = direct_activation;
+    
+    for (int other_cluster = 0; other_cluster < num_clusters; other_cluster++) {
+        if (other_cluster == cluster_id) continue;
+        
+        // Get intersection strength (cosine similarity between cluster centers)
+        float intersection = intersection_matrix[cluster_id * num_clusters + other_cluster];
+        
+        // If clusters intersect (similar), propagate activation
+        // We read the OLD activation (before update) to avoid race conditions
+        if (intersection > 0.3f) {  // Threshold for meaningful intersection
+            // Weighted propagation: stronger intersection = more propagation
+            propagated_activation += intersection * direct_activation * 0.2f;
+        }
+    }
+    
+    // Cap maximum activation
+    if (propagated_activation > 5.0f) propagated_activation = 5.0f;
+    
+    // Write final activation
+    cluster_activations[cluster_id] = propagated_activation;
+}
+
+// Update Venn cluster assignments (k-means style)
+__global__ void update_venn_clusters_kernel(
+    const float* embeddings,
+    float* cluster_centers,
+    int* assignments,
+    float* membership_weights,
+    int num_tokens,
+    int embed_dim,
+    int num_clusters
+) {
+    int token_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token_id >= num_tokens) return;
+    
+    // Find closest 2 clusters for this token
+    float min_dist1 = 1e9f, min_dist2 = 1e9f;
+    int cluster1 = -1, cluster2 = -1;
+    
+    for (int c = 0; c < num_clusters; c++) {
+        float dist = 0.0f;
+        for (int d = 0; d < embed_dim; d++) {
+            float diff = embeddings[token_id * embed_dim + d] - 
+                        cluster_centers[c * embed_dim + d];
+            dist += diff * diff;
+        }
+        
+        if (dist < min_dist1) {
+            min_dist2 = min_dist1;
+            cluster2 = cluster1;
+            min_dist1 = dist;
+            cluster1 = c;
+        } else if (dist < min_dist2) {
+            min_dist2 = dist;
+            cluster2 = c;
+        }
+    }
+    
+    // Assign to two closest clusters (Venn overlap)
+    assignments[token_id * 2] = cluster1;
+    assignments[token_id * 2 + 1] = cluster2;
+    
+    // Compute membership weights (inverse distance)
+    float w1 = 1.0f / (min_dist1 + 1e-6f);
+    float w2 = 1.0f / (min_dist2 + 1e-6f);
+    float total = w1 + w2;
+    
+    membership_weights[token_id * 2] = w1 / total;
+    membership_weights[token_id * 2 + 1] = w2 / total;
+}
+
+// Compute Venn intersection matrix (cosine similarity between cluster centers)
+__global__ void compute_venn_intersections_kernel(
+    const float* cluster_centers,
+    float* intersection_matrix,
+    int num_clusters,
+    int embed_dim,
+    float intersection_threshold
+) {
+    int cluster_a = blockIdx.x;
+    int cluster_b = blockIdx.y;
+    
+    if (cluster_a >= num_clusters || cluster_b >= num_clusters) return;
+    
+    // Self-intersection is always 1.0
+    if (cluster_a == cluster_b) {
+        intersection_matrix[cluster_a * num_clusters + cluster_b] = 1.0f;
+        return;
+    }
+    
+    // Compute cosine similarity: (A·B) / (||A|| * ||B||)
+    float dot_product = 0.0f;
+    float norm_a = 0.0f;
+    float norm_b = 0.0f;
+    
+    for (int d = 0; d < embed_dim; d++) {
+        float val_a = cluster_centers[cluster_a * embed_dim + d];
+        float val_b = cluster_centers[cluster_b * embed_dim + d];
+        
+        dot_product += val_a * val_b;
+        norm_a += val_a * val_a;
+        norm_b += val_b * val_b;
+    }
+    
+    // Cosine similarity
+    float similarity = dot_product / (sqrtf(norm_a) * sqrtf(norm_b) + 1e-9f);
+    
+    // Threshold: only keep significant intersections
+    // This creates sparse connectivity (Venn diagram philosophy)
+    float intersection = (similarity > intersection_threshold) ? similarity : 0.0f;
+    
+    // Symmetric matrix
+    intersection_matrix[cluster_a * num_clusters + cluster_b] = intersection;
+}
+// =============================================================================
+// NUOVO: K-MEANS ONLINE - KERNEL 1: ACCUMULA SOMME PER OGNI CLUSTER
+// =============================================================================
+__global__ void accumulate_cluster_updates_kernel(
+    const float* embeddings,         // [VOCAB_SIZE x EMBED_DIM]
+    const int* token_memberships,    // [VOCAB_SIZE x 2]
+    const float* membership_weights, // [VOCAB_SIZE x 2]
+    float* cluster_sums,             // [VENN_CLUSTERS x EMBED_DIM] - OUTPUT
+    float* cluster_counts,           // [VENN_CLUSTERS] - OUTPUT
+    int num_tokens,
+    int embed_dim,
+    int num_clusters
+) {
+    int token_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (token_id >= num_tokens) return;
+    
+    // Per ogni token, accumula la sua embedding nei suoi 2 cluster
+    for (int m = 0; m < 2; m++) {
+        int cluster_id = token_memberships[token_id * 2 + m];
+        
+        if (cluster_id >= 0 && cluster_id < num_clusters) {
+            float weight = membership_weights[token_id * 2 + m];
+            
+            // Accumula weighted embedding nel cluster
+            for (int d = 0; d < embed_dim; d++) {
+                float emb_val = embeddings[token_id * embed_dim + d];
+                atomicAdd(&cluster_sums[cluster_id * embed_dim + d], emb_val * weight);
+            }
+            
+            // Accumula peso totale
+            atomicAdd(&cluster_counts[cluster_id], weight);
+        }
+    }
+}
+
+// =============================================================================
+// NUOVO: K-MEANS ONLINE - KERNEL 2: AGGIORNA CENTRI CON MEDIA
+// =============================================================================
+__global__ void update_cluster_centers_kernel(
+    const float* cluster_sums,   // [VENN_CLUSTERS x EMBED_DIM]
+    const float* cluster_counts, // [VENN_CLUSTERS]
+    float* cluster_centers,      // [VENN_CLUSTERS x EMBED_DIM] - OUTPUT
+    int num_clusters,
+    int embed_dim,
+    float learning_rate          // Per smooth update: new = old * (1-lr) + mean * lr
+) {
+    int cluster_id = blockIdx.x;
+    int dim = threadIdx.x;
+    
+    if (cluster_id >= num_clusters || dim >= embed_dim) return;
+    
+    float count = cluster_counts[cluster_id];
+    
+    // Se il cluster ha almeno 1 token assegnato
+    if (count > 1e-6f) {
+        float sum = cluster_sums[cluster_id * embed_dim + dim];
+        float mean = sum / count;
+        
+        // Smooth update: mix vecchio centro con nuova media
+        float old_center = cluster_centers[cluster_id * embed_dim + dim];
+        float new_center = old_center * (1.0f - learning_rate) + mean * learning_rate;
+        
+        cluster_centers[cluster_id * embed_dim + dim] = new_center;
+    }
+    // Altrimenti lascia il centro com'è (non si muove)
+}
+
+
+
+__global__ void sample_from_semantic_space_kernel(
+    const float* cluster_activations,
+    const int* token_memberships,
+    const float* membership_weights,
+    int* new_tokens,
+    int num_tokens,
+    int vocab_size,
+    int num_clusters,
+    unsigned long long seed
+) {
+    int pos = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pos >= num_tokens) return;
+    
+    curandState state;
+    curand_init(seed, pos, 0, &state);
+    
+    // Build token probability distribution based on cluster activations
+    // Strategy: token_prob = sum over its clusters of (cluster_activation * membership_weight)
+    
+    float max_prob = -1e9f;
+    int best_token = 0;
+    
+    // Sample up to 1024 tokens (memory constraint for shared memory approach)
+    // For full vocab, use rejection sampling
+    int samples_to_check = (vocab_size < 1024) ? vocab_size : 1024;
+    
+    for (int sample = 0; sample < samples_to_check; sample++) {
+        // Either check all tokens (small vocab) or random subset (large vocab)
+        int token;
+        if (vocab_size < 1024) {
+            token = sample;
+        } else {
+            // Random token for stochastic sampling
+            token = (int)(curand_uniform(&state) * vocab_size) % vocab_size;
+        }
+        
+        if (token < 0 || token >= vocab_size) continue;
+        
+        // Compute token probability from its cluster memberships
+        float token_prob = 0.0f;
+        
+        // Each token belongs to up to 2 clusters (Venn overlap)
+        for (int m = 0; m < 2; m++) {
+            int cluster_id = token_memberships[token * 2 + m];
+            
+            // Check if valid cluster assignment
+            if (cluster_id >= 0 && cluster_id < num_clusters) {
+                float activation = cluster_activations[cluster_id];
+                float weight = membership_weights[token * 2 + m];
+                
+                // Weighted contribution from this cluster
+                token_prob += activation * weight;
+            }
+        }
+        
+        // Add small exploration noise
+        float exploration = curand_normal(&state) * 0.05f;
+        token_prob += exploration;
+        
+        // Track best token
+        if (token_prob > max_prob) {
+            max_prob = token_prob;
+            best_token = token;
+        }
+    }
+    
+    // Ensure valid token
+    if (best_token < 0 || best_token >= vocab_size) {
+        best_token = (int)(curand_uniform(&state) * vocab_size) % vocab_size;
+    }
+    
+    new_tokens[pos] = best_token;
+}
+
+void* background_self_training(void* arg) {
+    UnifiedVectorLLM* system = (UnifiedVectorLLM*)arg;
+    
+    printf("Background training thread started - NanoGPT style!\\n");
+    
+    while (system->running) {
+        if (system->current_mode == MODE_SELF_LOOP) {
+            // ============================================================
+            // FULL TRAINING CYCLE
+            // ============================================================
+            
+            dim3 block(256);
+            int seq_len = system->llm.seq_len;
+            
+            // 1. FORWARD PASS
+            // ----------------
+            
+            // 1a. Embedding lookup (DUAL)
+            dim3 grid_embed(seq_len);
+            embedding_forward_kernel<<<grid_embed, EMBED_DIM, 0, system->gpu.main_stream>>>(
+                system->llm.char_embeddings,
+                system->llm.word_embeddings,
+                system->llm.word_valid_mask,
+                system->llm.pos_embeddings,
+                system->llm.current_sequence,
+                system->llm.hidden_states,
+                seq_len,
+                EMBED_DIM
+            );
+            
+            // 1b. Attention (simplified)
+            dim3 grid_attn(seq_len, NUM_HEADS);
+            attention_forward_kernel<<<grid_attn, 1, 0, system->gpu.main_stream>>>(
+                system->llm.hidden_states,
+                system->llm.qkv_weights,
+                system->llm.attention_output,
+                seq_len,
+                EMBED_DIM,
+                NUM_HEADS
+            );
+            
+            // 1c. FFN
+            dim3 grid_ffn(seq_len);
+            ffn_forward_kernel<<<grid_ffn, EMBED_DIM, 0, system->gpu.main_stream>>>(
+                system->llm.attention_output,
+                system->llm.ffn_w1,
+                system->llm.ffn_w2,
+                system->llm.hidden_states,
+                seq_len,
+                EMBED_DIM
+            );
+            
+            // 1d. Output projection → logits (TOTAL VOCAB)
+            dim3 grid_output(seq_len, (TOTAL_VOCAB_SIZE + 255) / 256);
+            output_projection_kernel<<<grid_output, 256, 0, system->gpu.main_stream>>>(
+                system->llm.hidden_states,
+                system->llm.output_weights,
+                system->llm.logits,
+                seq_len,
+                EMBED_DIM,
+                TOTAL_VOCAB_SIZE
+            );
+            
+            // 2. LOSS COMPUTATION
+            // -------------------
+            
+            // Reset loss to zero BEFORE computation
+            cudaMemsetAsync(&system->llm.current_loss, 0, sizeof(float), 
+                           system->gpu.main_stream);
+            
+            // Compute cross-entropy
+            dim3 grid_loss((seq_len + 255) / 256);
+            cross_entropy_loss_kernel<<<grid_loss, 256, 0, system->gpu.main_stream>>>(
+                system->llm.logits,
+                system->llm.current_sequence,
+                &system->llm.current_loss,
+                seq_len,
+                TOTAL_VOCAB_SIZE
+            );
+            
+            // 3. BACKWARD PASS
+            // ----------------
+            
+            // Zero gradients (DUAL)
+            cudaMemsetAsync(system->llm.grad_output_weights, 0, 
+                           TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float), 
+                           system->gpu.main_stream);
+            cudaMemsetAsync(system->llm.grad_char_embeddings, 0,
+                           CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float),
+                           system->gpu.main_stream);
+            cudaMemsetAsync(system->llm.grad_word_embeddings, 0,
+                           MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float),
+                           system->gpu.main_stream);
+            
+            // Backward through output projection
+            dim3 block_backward(256);
+            dim3 grid_backward(seq_len, (TOTAL_VOCAB_SIZE + 255) / 256);
+            output_projection_backward_kernel<<<grid_backward, block_backward, 0, system->gpu.main_stream>>>(
+                system->llm.logits,
+                system->llm.current_sequence,
+                system->llm.hidden_states,
+                system->llm.grad_output_weights,
+                system->llm.grad_hidden_states,
+                seq_len,
+                EMBED_DIM,
+                TOTAL_VOCAB_SIZE
+            );
+            
+            // Backward through embeddings (DUAL)
+            dim3 grid_emb_back(seq_len);
+            embedding_backward_kernel<<<grid_emb_back, EMBED_DIM, 0, system->gpu.main_stream>>>(
+                system->llm.current_sequence,
+                system->llm.grad_hidden_states,
+                system->llm.grad_char_embeddings,
+                system->llm.grad_word_embeddings,
+                seq_len,
+                EMBED_DIM
+            );
+            
+            // 4. WEIGHT UPDATE (SGD) - DUAL EMBEDDINGS
+            // ----------------------
+            
+            // Update output weights
+            int n_params_output = TOTAL_VOCAB_SIZE * EMBED_DIM;
+            dim3 grid_update_output((n_params_output + 255) / 256);
+            
+            sgd_update_kernel<<<grid_update_output, 256, 0, system->gpu.main_stream>>>(
+                system->llm.output_weights,
+                system->llm.grad_output_weights,
+                system->llm.momentum_output,
+                system->llm.learning_rate,
+                system->llm.momentum,
+                n_params_output
+            );
+            
+            // Update char embeddings (LOWER LR!)
+            int n_params_char = CHAR_VOCAB_SIZE * EMBED_DIM;
+            dim3 grid_update_char((n_params_char + 255) / 256);
+            
+            sgd_update_kernel<<<grid_update_char, 256, 0, system->gpu.main_stream>>>(
+                system->llm.char_embeddings,
+                system->llm.grad_char_embeddings,
+                system->llm.momentum_char_emb,
+                system->llm.learning_rate * 0.1f,  // 10x slower!
+                system->llm.momentum,
+                n_params_char
+            );
+            
+            // Update word embeddings (LOWER LR!)
+            int n_params_word = MAX_WORD_VOCAB_SIZE * EMBED_DIM;
+            dim3 grid_update_word((n_params_word + 255) / 256);
+            
+            sgd_update_kernel<<<grid_update_word, 256, 0, system->gpu.main_stream>>>(
+                system->llm.word_embeddings,
+                system->llm.grad_word_embeddings,
+                system->llm.momentum_word_emb,
+                system->llm.learning_rate * 0.1f,  // 10x slower!
+                system->llm.momentum,
+                n_params_word
+            );
+            
+            // 5. SEMANTIC SPACE NAVIGATION
+            // ----------------------------
+            
+            // Extract semantic embedding from hidden states
+            dim3 grid_semantic((EMBED_DIM + 255) / 256);
+            extract_semantic_embedding_kernel<<<grid_semantic, block, 0, system->gpu.venn_stream>>>(
+                system->llm.hidden_states,
+                system->llm.semantic_state,
+                seq_len,
+                EMBED_DIM
+            );
+            
+            // Navigate Venn space (WITH semantic propagation)
+            dim3 grid_venn((VENN_CLUSTERS + 255) / 256);
+            navigate_venn_space_kernel<<<grid_venn, block, 0, system->gpu.venn_stream>>>(
+                system->llm.semantic_state,
+                system->venn.cluster_centers,
+                system->venn.intersection_matrix,  // NOW USED
+                system->llm.cluster_activations,
+                EMBED_DIM,
+                VENN_CLUSTERS,
+                system->llm.exploration_temperature
+            );
+            
+            // Sample new tokens from semantic space (WEIGHTED by clusters)
+            dim3 grid_sample((seq_len + 255) / 256);
+            sample_from_semantic_space_kernel<<<grid_sample, block, 0, system->gpu.venn_stream>>>(
+                system->llm.cluster_activations,
+                system->venn.token_memberships,
+                system->venn.membership_weights,  // NOW USED
+                system->llm.current_sequence,
+                seq_len,
+                TOTAL_VOCAB_SIZE,
+                VENN_CLUSTERS,
+                system->llm.random_seed++
+            );
+            
+            // 6. STATISTICS UPDATE
+            // --------------------
+            
+            system->self_training_cycles++;
+            system->total_tokens_processed += seq_len;
+            
+            // Sync streams every 10 cycles BEFORE reading loss
+            if (system->self_training_cycles % 10 == 0) {
+                // CRITICAL: Sync BEFORE reading device memory
+                cudaStreamSynchronize(system->gpu.main_stream);
+                cudaStreamSynchronize(system->gpu.venn_stream);
+                
+                // NOW safe to read loss
+                float h_loss;
+                cudaMemcpy(&h_loss, &system->llm.current_loss, sizeof(float), cudaMemcpyDeviceToHost);
+                system->current_perplexity = expf(h_loss);
+            }
+            
+            // ========================================================================
+            // UPDATE VENN CLUSTERS OGNI 100 CICLI (K-MEANS ONLINE)
+            // Usa CHAR embeddings come base semantica (256 caratteri fissi)
+            // ========================================================================
+            if (system->self_training_cycles % 100 == 0) {
+                // Step 1: Update assignments (solo char embeddings)
+                dim3 grid_venn_update((CHAR_VOCAB_SIZE + 255) / 256);
+                update_venn_clusters_kernel<<<grid_venn_update, block, 0, system->gpu.venn_stream>>>(
+                    system->llm.char_embeddings,
+                    system->venn.cluster_centers,
+                    system->venn.token_memberships,
+                    system->venn.membership_weights,
+                    CHAR_VOCAB_SIZE,
+                    EMBED_DIM,
+                    VENN_CLUSTERS
+                );
+                
+                // Step 2: Zero cluster accumulators
+                cudaMemsetAsync(system->venn.cluster_sums, 0, 
+                               VENN_CLUSTERS * EMBED_DIM * sizeof(float),
+                               system->gpu.venn_stream);
+                cudaMemsetAsync(system->venn.cluster_counts, 0,
+                               VENN_CLUSTERS * sizeof(float),
+                               system->gpu.venn_stream);
+                
+                // Step 3: Accumulate weighted embeddings per cluster
+                accumulate_cluster_updates_kernel<<<grid_venn_update, block, 0, system->gpu.venn_stream>>>(
+                    system->llm.char_embeddings,
+                    system->venn.token_memberships,
+                    system->venn.membership_weights,
+                    system->venn.cluster_sums,
+                    system->venn.cluster_counts,
+                    CHAR_VOCAB_SIZE,
+                    EMBED_DIM,
+                    VENN_CLUSTERS
+                );
+                
+                // Step 4: NUOVO - Update cluster centers (smooth)
+                dim3 grid_centers(VENN_CLUSTERS);
+                update_cluster_centers_kernel<<<grid_centers, EMBED_DIM, 0, system->gpu.venn_stream>>>(
+                    system->venn.cluster_sums,
+                    system->venn.cluster_counts,
+                    system->venn.cluster_centers,
+                    VENN_CLUSTERS,
+                    EMBED_DIM,
+                    0.1f  // Learning rate per smooth update (10% new, 90% old)
+                );
+                
+                // Step 5: Recompute intersection matrix (come prima)
+                dim3 grid_intersect(VENN_CLUSTERS, VENN_CLUSTERS);
+                compute_venn_intersections_kernel<<<grid_intersect, 1, 0, system->gpu.venn_stream>>>(
+                    system->venn.cluster_centers,
+                    system->venn.intersection_matrix,
+                    VENN_CLUSTERS,
+                    EMBED_DIM,
+                    0.5f
+                );
+            }
+            
+            // Sleep to prevent GPU overheating on busy loop
+            usleep(5000); // 5ms - allows ~200 cycles/sec
+            
+        } else {
+            // External input mode - sleep longer
+            usleep(100000); // 100ms
+        }
+    }
+    
+    printf("Training thread stopped after %lld cycles\\n", system->self_training_cycles);
+    return NULL;
+}
+
+// C API Exports
+extern "C" {
+
+static UnifiedVectorLLM* g_system = NULL;
+
+int init_system(void) {
+    if (g_system) return -1;
+    g_system = (UnifiedVectorLLM*)calloc(1, sizeof(UnifiedVectorLLM));
+    
+    cudaSetDevice(0);
+    cudaStreamCreate(&g_system->gpu.main_stream);
+    cudaStreamCreate(&g_system->gpu.venn_stream);
+    cublasCreate(&g_system->gpu.cublas_handle);
+    
+    // Allocate model parameters - DUAL EMBEDDINGS
+    cudaMalloc(&g_system->llm.char_embeddings, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.word_embeddings, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.word_valid_mask, MAX_WORD_VOCAB_SIZE * sizeof(int));
+    cudaMalloc(&g_system->llm.pos_embeddings, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.qkv_weights, 3 * EMBED_DIM * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.ffn_w1, 4 * EMBED_DIM * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.ffn_w2, 4 * EMBED_DIM * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.output_weights, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    
+    // Allocate gradients - DUAL
+    cudaMalloc(&g_system->llm.grad_char_embeddings, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_word_embeddings, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_hidden_states, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_output_weights, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    
+    // Allocate momentum buffers - DUAL
+    cudaMalloc(&g_system->llm.momentum_char_emb, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.momentum_word_emb, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.momentum_output, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    
+    // Allocate forward buffers
+    cudaMalloc(&g_system->llm.hidden_states, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.attention_output, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.logits, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
+    
+    // Allocate semantic navigation buffers
+    cudaMalloc(&g_system->llm.semantic_state, EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->llm.cluster_activations, VENN_CLUSTERS * sizeof(float));
+    cudaMalloc(&g_system->llm.current_sequence, MAX_SEQ_LEN * sizeof(int));
+    
+    // Allocate Venn system (usa CHAR_VOCAB_SIZE per semantic base)
+    cudaMalloc(&g_system->venn.cluster_centers, VENN_CLUSTERS * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->venn.token_memberships, CHAR_VOCAB_SIZE * 2 * sizeof(int));
+    cudaMalloc(&g_system->venn.membership_weights, CHAR_VOCAB_SIZE * 2 * sizeof(float));
+    cudaMalloc(&g_system->venn.intersection_matrix, VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float));
+    
+    // Alloca buffer k-means
+    cudaMalloc(&g_system->venn.cluster_sums, VENN_CLUSTERS * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->venn.cluster_counts, VENN_CLUSTERS * sizeof(float));
+    
+    // Allocate episodic memory
+    cudaMalloc(&g_system->episodic.episode_embeddings, EPISODIC_BUFFER_SIZE * EMBED_DIM * sizeof(float));
+    cudaMalloc(&g_system->episodic.rewards, EPISODIC_BUFFER_SIZE * sizeof(float));
+    
+    // Initialize with random weights
+    curandGenerator_t gen;
+    curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+    curandSetPseudoRandomGeneratorSeed(gen, time(NULL));
+    
+    // Xavier initialization for embeddings (DUAL)
+    float xavier_std_char = sqrtf(2.0f / (CHAR_VOCAB_SIZE + EMBED_DIM));
+    float xavier_std_word = sqrtf(2.0f / (MAX_WORD_VOCAB_SIZE + EMBED_DIM));
+    float xavier_std_out = sqrtf(2.0f / (TOTAL_VOCAB_SIZE + EMBED_DIM));
+    
+    curandGenerateNormal(gen, g_system->llm.char_embeddings, CHAR_VOCAB_SIZE * EMBED_DIM, 0.0f, xavier_std_char);
+    curandGenerateNormal(gen, g_system->llm.word_embeddings, MAX_WORD_VOCAB_SIZE * EMBED_DIM, 0.0f, xavier_std_word);
+    curandGenerateNormal(gen, g_system->llm.pos_embeddings, MAX_SEQ_LEN * EMBED_DIM, 0.0f, 0.02f);
+    curandGenerateNormal(gen, g_system->llm.output_weights, TOTAL_VOCAB_SIZE * EMBED_DIM, 0.0f, xavier_std_out);
+    
+    // Initialize Venn cluster centers
+    curandGenerateNormal(gen, g_system->venn.cluster_centers, VENN_CLUSTERS * EMBED_DIM, 0.0f, 0.1f);
+    
+    curandDestroyGenerator(gen);
+    
+    // Initialize word_valid_mask (all zeros = no words active yet)
+    cudaMemset(g_system->llm.word_valid_mask, 0, MAX_WORD_VOCAB_SIZE * sizeof(int));
+    g_system->llm.current_word_vocab_size = 0;
+    
+    // Initialize token memberships and weights (CHAR_VOCAB_SIZE per Venn)
+    int* h_memberships = (int*)malloc(CHAR_VOCAB_SIZE * 2 * sizeof(int));
+    float* h_weights = (float*)malloc(CHAR_VOCAB_SIZE * 2 * sizeof(float));
+    for (int i = 0; i < CHAR_VOCAB_SIZE; i++) {
+        h_memberships[i * 2] = rand() % VENN_CLUSTERS;      // Primary cluster
+        h_memberships[i * 2 + 1] = rand() % VENN_CLUSTERS;  // Secondary cluster
+        h_weights[i * 2] = 0.6f;      // Primary weight
+        h_weights[i * 2 + 1] = 0.4f;  // Secondary weight
+    }
+    cudaMemcpy(g_system->venn.token_memberships, h_memberships, 
+               CHAR_VOCAB_SIZE * 2 * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->venn.membership_weights, h_weights,
+               CHAR_VOCAB_SIZE * 2 * sizeof(float), cudaMemcpyHostToDevice);
+    free(h_memberships);
+    free(h_weights);
+    
+    // Initialize intersection matrix (will be computed during training)
+    cudaMemset(g_system->venn.intersection_matrix, 0, 
+               VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float));
+    
+    // Zero momentum buffers (DUAL)
+    cudaMemset(g_system->llm.momentum_char_emb, 0, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMemset(g_system->llm.momentum_word_emb, 0, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMemset(g_system->llm.momentum_output, 0, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    
+    // Initialize random sequence (solo caratteri inizialmente)
+    int* h_init_seq = (int*)malloc(64 * sizeof(int));
+    for (int i = 0; i < 64; i++) h_init_seq[i] = rand() % CHAR_VOCAB_SIZE;
+    cudaMemcpy(g_system->llm.current_sequence, h_init_seq, 64 * sizeof(int), cudaMemcpyHostToDevice);
+    free(h_init_seq);
+    
+    // Set hyperparameters
+    g_system->llm.learning_rate = 0.0001f;  // Conservative for continuous training
+    g_system->llm.exploration_temperature = 1.0f;
+    g_system->llm.momentum = 0.9f;  // High momentum for stability
+    g_system->llm.seq_len = 64;
+    g_system->llm.random_seed = time(NULL);
+    
+    // Set mode
+    g_system->current_mode = MODE_SELF_LOOP;
+    g_system->running = 1;
+    
+    // Start background training thread
+    pthread_create(&g_system->background_thread, NULL, background_self_training, g_system);
+    
+    printf("VectLLM Initialized - NanoGPT-style continuous training active\\n");
+    printf("Learning rate: %.6f | Momentum: %.2f | Seq length: %d\\n",
+           g_system->llm.learning_rate, g_system->llm.momentum, g_system->llm.seq_len);
+    
+    return 0;
+}
+
+void shutdown_system(void) {
+    if (!g_system) return;
+    g_system->running = 0;
+    pthread_join(g_system->background_thread, NULL);
+    
+    // Free model parameters - DUAL
+    cudaFree(g_system->llm.char_embeddings);
+    cudaFree(g_system->llm.word_embeddings);
+    cudaFree(g_system->llm.word_valid_mask);
+    cudaFree(g_system->llm.pos_embeddings);
+    cudaFree(g_system->llm.qkv_weights);
+    cudaFree(g_system->llm.ffn_w1);
+    cudaFree(g_system->llm.ffn_w2);
+    cudaFree(g_system->llm.output_weights);
+    
+    // Free gradients - DUAL
+    cudaFree(g_system->llm.grad_char_embeddings);
+    cudaFree(g_system->llm.grad_word_embeddings);
+    cudaFree(g_system->llm.grad_hidden_states);
+    cudaFree(g_system->llm.grad_output_weights);
+    
+    // Free momentum - DUAL
+    cudaFree(g_system->llm.momentum_char_emb);
+    cudaFree(g_system->llm.momentum_word_emb);
+    cudaFree(g_system->llm.momentum_output);
+    
+    // Free forward buffers
+    cudaFree(g_system->llm.hidden_states);
+    cudaFree(g_system->llm.attention_output);
+    cudaFree(g_system->llm.logits);
+    
+    // Free semantic navigation
+    cudaFree(g_system->llm.semantic_state);
+    cudaFree(g_system->llm.cluster_activations);
+    cudaFree(g_system->llm.current_sequence);
+    
+    // Free Venn system
+    cudaFree(g_system->venn.cluster_centers);
+    cudaFree(g_system->venn.token_memberships);
+    cudaFree(g_system->venn.membership_weights);
+    cudaFree(g_system->venn.intersection_matrix);
+    
+    // Cleanup buffer k-means
+    cudaFree(g_system->venn.cluster_sums);
+    cudaFree(g_system->venn.cluster_counts);
+    
+    // Free episodic
+    cudaFree(g_system->episodic.episode_embeddings);
+    cudaFree(g_system->episodic.rewards);
+    
+    cudaStreamDestroy(g_system->gpu.main_stream);
+    cudaStreamDestroy(g_system->gpu.venn_stream);
+    cublasDestroy(g_system->gpu.cublas_handle);
+    
+    free(g_system);
+    g_system = NULL;
+}
+
+void set_mode(int mode) {
+    if (g_system) g_system->current_mode = (OperationMode)mode;
+}
+
+void set_exploration_params(float temp, float momentum) {
+    if (!g_system) return;
+    g_system->llm.exploration_temperature = temp;
+    g_system->llm.momentum = momentum;
+}
+
+void process_input(const char* text) {
+    if (!g_system) return;
+    int len = strlen(text);
+    if (len > MAX_SEQ_LEN) len = MAX_SEQ_LEN;
+    
+    int* h_tokens = (int*)malloc(len * sizeof(int));
+    for (int i = 0; i < len; i++) h_tokens[i] = (int)text[i];
+    
+    cudaMemcpy(g_system->llm.current_sequence, h_tokens, len * sizeof(int), cudaMemcpyHostToDevice);
+    g_system->llm.seq_len = len;
+    free(h_tokens);
+}
+
+int get_output(int* output, int max_len) {
+    if (!g_system) return 0;
+    int len = (g_system->llm.seq_len < max_len) ? g_system->llm.seq_len : max_len;
+    cudaMemcpy(output, g_system->llm.current_sequence, len * sizeof(int), cudaMemcpyDeviceToHost);
+    return len;
+}
+
+void get_stats(long long* cycles, long long* tokens, float* temp, float* momentum, float* loss, float* perplexity) {
+    if (!g_system) return;
+    *cycles = g_system->self_training_cycles;
+    *tokens = g_system->total_tokens_processed;
+    *temp = g_system->llm.exploration_temperature;
+    *momentum = g_system->llm.momentum;
+    
+    // Copy current loss from device
+    cudaMemcpy(loss, &g_system->llm.current_loss, sizeof(float), cudaMemcpyDeviceToHost);
+    *perplexity = expf(*loss);
+}
+
+void set_reward(float reward) {
+    if (!g_system) return;
+    int idx = g_system->episodic.write_index % EPISODIC_BUFFER_SIZE;
+    cudaMemcpy(g_system->episodic.rewards + idx, &reward, sizeof(float), cudaMemcpyHostToDevice);
+    g_system->episodic.write_index++;
+    g_system->episodic.avg_reward = 0.1f * reward + 0.9f * g_system->episodic.avg_reward;
+}
+
+// ============================================================================
+// CHECKPOINT SYSTEM
+// ============================================================================
+
+int save_checkpoint(const char* filepath) {
+    if (!g_system) {
+        fprintf(stderr, "System not initialized\\n");
+        return -1;
+    }
+    
+    FILE* f = fopen(filepath, "wb");
+    if (!f) {
+        fprintf(stderr, "Failed to open checkpoint file for writing: %s\\n", filepath);
+        return -1;
+    }
+    
+    // Write header (V3 con vocab dinamico)
+    CheckpointHeader header;
+    strncpy(header.magic, "VECTLLM3", 8);
+    header.version = 3;
+    header.char_vocab_size = CHAR_VOCAB_SIZE;
+    header.current_word_vocab_size = g_system->llm.current_word_vocab_size;
+    header.max_word_vocab_size = MAX_WORD_VOCAB_SIZE;
+    header.embed_dim = EMBED_DIM;
+    header.num_layers = NUM_LAYERS;
+    header.num_heads = NUM_HEADS;
+    header.num_clusters = VENN_CLUSTERS;
+    header.total_cycles = g_system->self_training_cycles;
+    header.total_tokens = g_system->total_tokens_processed;
+    header.timestamp = time(NULL);
+    cudaMemcpy(&header.current_loss, &g_system->llm.current_loss, sizeof(float), cudaMemcpyDeviceToHost);
+    header.learning_rate = g_system->llm.learning_rate;
+    header.momentum = g_system->llm.momentum;
+    
+    fwrite(&header, sizeof(CheckpointHeader), 1, f);
+    
+    // Allocate host buffers (DUAL)
+    size_t char_emb_size = CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    size_t word_emb_size = MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    size_t pos_emb_size = MAX_SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t output_size = TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    
+    float* h_char_emb = (float*)malloc(char_emb_size);
+    float* h_word_emb = (float*)malloc(word_emb_size);
+    int* h_word_mask = (int*)malloc(MAX_WORD_VOCAB_SIZE * sizeof(int));
+    float* h_pos_emb = (float*)malloc(pos_emb_size);
+    float* h_output = (float*)malloc(output_size);
+    float* h_momentum_char = (float*)malloc(char_emb_size);
+    float* h_momentum_word = (float*)malloc(word_emb_size);
+    float* h_momentum_output = (float*)malloc(output_size);
+    
+    // Buffer Venn (usa CHAR_VOCAB_SIZE)
+    size_t cluster_centers_size = VENN_CLUSTERS * EMBED_DIM * sizeof(float);
+    size_t token_memberships_size = CHAR_VOCAB_SIZE * 2 * sizeof(int);
+    size_t membership_weights_size = CHAR_VOCAB_SIZE * 2 * sizeof(float);
+    size_t intersection_matrix_size = VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float);
+    
+    float* h_cluster_centers = (float*)malloc(cluster_centers_size);
+    int* h_token_memberships = (int*)malloc(token_memberships_size);
+    float* h_membership_weights = (float*)malloc(membership_weights_size);
+    float* h_intersection_matrix = (float*)malloc(intersection_matrix_size);
+    
+    // Copy weights from device to host (DUAL)
+    cudaMemcpy(h_char_emb, g_system->llm.char_embeddings, char_emb_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_word_emb, g_system->llm.word_embeddings, word_emb_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_word_mask, g_system->llm.word_valid_mask, MAX_WORD_VOCAB_SIZE * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_pos_emb, g_system->llm.pos_embeddings, pos_emb_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_output, g_system->llm.output_weights, output_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_momentum_char, g_system->llm.momentum_char_emb, char_emb_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_momentum_word, g_system->llm.momentum_word_emb, word_emb_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_momentum_output, g_system->llm.momentum_output, output_size, cudaMemcpyDeviceToHost);
+    
+    // Copy Venn state
+    cudaMemcpy(h_cluster_centers, g_system->venn.cluster_centers, cluster_centers_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_token_memberships, g_system->venn.token_memberships, token_memberships_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_membership_weights, g_system->venn.membership_weights, membership_weights_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_intersection_matrix, g_system->venn.intersection_matrix, intersection_matrix_size, cudaMemcpyDeviceToHost);
+    
+    // Write weights (V3 format: DUAL embeddings)
+    fwrite(h_char_emb, char_emb_size, 1, f);
+    fwrite(h_word_emb, word_emb_size, 1, f);
+    fwrite(h_word_mask, MAX_WORD_VOCAB_SIZE * sizeof(int), 1, f);
+    fwrite(h_pos_emb, pos_emb_size, 1, f);
+    fwrite(h_output, output_size, 1, f);
+    fwrite(h_momentum_char, char_emb_size, 1, f);
+    fwrite(h_momentum_word, word_emb_size, 1, f);
+    fwrite(h_momentum_output, output_size, 1, f);
+    
+    // Write Venn state
+    fwrite(h_cluster_centers, cluster_centers_size, 1, f);
+    fwrite(h_token_memberships, token_memberships_size, 1, f);
+    fwrite(h_membership_weights, membership_weights_size, 1, f);
+    fwrite(h_intersection_matrix, intersection_matrix_size, 1, f);
+    
+    // Cleanup
+    free(h_char_emb);
+    free(h_word_emb);
+    free(h_word_mask);
+    free(h_pos_emb);
+    free(h_output);
+    free(h_momentum_char);
+    free(h_momentum_word);
+    free(h_momentum_output);
+    free(h_cluster_centers);
+    free(h_token_memberships);
+    free(h_membership_weights);
+    free(h_intersection_matrix);
+    
+    fclose(f);
+    
+    g_system->last_checkpoint_time = time(NULL);
+    printf("✅ Checkpoint saved: %s (cycles: %lld, loss: %.4f)\\n", 
+           filepath, header.total_cycles, header.current_loss);
+    
+    return 0;
+}
+
+int load_checkpoint(const char* filepath) {
+    if (!g_system) {
+        fprintf(stderr, "System not initialized\n");
+        return -1;
+    }
+    
+    FILE* f = fopen(filepath, "rb");
+    if (!f) {
+        fprintf(stderr, "Failed to open checkpoint file: %s\n", filepath);
+        return -1;
+    }
+    
+    // Read header
+    CheckpointHeader header;
+    if (fread(&header, sizeof(CheckpointHeader), 1, f) != 1) {
+        fprintf(stderr, "Failed to read checkpoint header\n");
+        fclose(f);
+        return -1;
+    }
+    
+    // Verify magic (solo V3 con vocab dinamico)
+    int is_v3 = (strncmp(header.magic, "VECTLLM3", 8) == 0);
+    
+    if (!is_v3) {
+        fprintf(stderr, "Unsupported checkpoint version (need V3 with dynamic vocab)\n");
+        fprintf(stderr, "Magic: %.8s\n", header.magic);
+        fclose(f);
+        return -1;
+    }
+    
+    // Verify dimensions
+    if (header.char_vocab_size != CHAR_VOCAB_SIZE || header.embed_dim != EMBED_DIM) {
+        fprintf(stderr, "Checkpoint dimension mismatch\n");
+        fclose(f);
+        return -1;
+    }
+    
+    // Allocate host buffers (DUAL)
+    size_t char_emb_size = CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    size_t word_emb_size = MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    size_t pos_emb_size = MAX_SEQ_LEN * EMBED_DIM * sizeof(float);
+    size_t output_size = TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    
+    float* h_char_emb = (float*)malloc(char_emb_size);
+    float* h_word_emb = (float*)malloc(word_emb_size);
+    int* h_word_mask = (int*)malloc(MAX_WORD_VOCAB_SIZE * sizeof(int));
+    float* h_pos_emb = (float*)malloc(pos_emb_size);
+    float* h_output = (float*)malloc(output_size);
+    float* h_momentum_char = (float*)malloc(char_emb_size);
+    float* h_momentum_word = (float*)malloc(word_emb_size);
+    float* h_momentum_output = (float*)malloc(output_size);
+    
+    // Venn buffers
+    size_t cluster_centers_size = VENN_CLUSTERS * EMBED_DIM * sizeof(float);
+    size_t token_memberships_size = CHAR_VOCAB_SIZE * 2 * sizeof(int);
+    size_t membership_weights_size = CHAR_VOCAB_SIZE * 2 * sizeof(float);
+    size_t intersection_matrix_size = VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float);
+    
+    float* h_cluster_centers = (float*)malloc(cluster_centers_size);
+    int* h_token_memberships = (int*)malloc(token_memberships_size);
+    float* h_membership_weights = (float*)malloc(membership_weights_size);
+    float* h_intersection_matrix = (float*)malloc(intersection_matrix_size);
+    
+    // Read weights (V3 format)
+    if (fread(h_char_emb, char_emb_size, 1, f) != 1 ||
+        fread(h_word_emb, word_emb_size, 1, f) != 1 ||
+        fread(h_word_mask, MAX_WORD_VOCAB_SIZE * sizeof(int), 1, f) != 1 ||
+        fread(h_pos_emb, pos_emb_size, 1, f) != 1 ||
+        fread(h_output, output_size, 1, f) != 1 ||
+        fread(h_momentum_char, char_emb_size, 1, f) != 1 ||
+        fread(h_momentum_word, word_emb_size, 1, f) != 1 ||
+        fread(h_momentum_output, output_size, 1, f) != 1) {
+        fprintf(stderr, "Failed to read checkpoint weights\n");
+        goto cleanup_and_fail;
+    }
+    
+    // Read Venn state
+    if (fread(h_cluster_centers, cluster_centers_size, 1, f) != 1 ||
+        fread(h_token_memberships, token_memberships_size, 1, f) != 1 ||
+        fread(h_membership_weights, membership_weights_size, 1, f) != 1 ||
+        fread(h_intersection_matrix, intersection_matrix_size, 1, f) != 1) {
+        fprintf(stderr, "Failed to read Venn state\n");
+        goto cleanup_and_fail;
+    }
+    
+    // Copy to device (DUAL)
+    cudaMemcpy(g_system->llm.char_embeddings, h_char_emb, char_emb_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.word_embeddings, h_word_emb, word_emb_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.word_valid_mask, h_word_mask, MAX_WORD_VOCAB_SIZE * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.pos_embeddings, h_pos_emb, pos_emb_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.output_weights, h_output, output_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.momentum_char_emb, h_momentum_char, char_emb_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.momentum_word_emb, h_momentum_word, word_emb_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->llm.momentum_output, h_momentum_output, output_size, cudaMemcpyHostToDevice);
+    
+    // Copy Venn state
+    cudaMemcpy(g_system->venn.cluster_centers, h_cluster_centers, cluster_centers_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->venn.token_memberships, h_token_memberships, token_memberships_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->venn.membership_weights, h_membership_weights, membership_weights_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(g_system->venn.intersection_matrix, h_intersection_matrix, intersection_matrix_size, cudaMemcpyHostToDevice);
+    
+    // Restore metadata
+    g_system->self_training_cycles = header.total_cycles;
+    g_system->total_tokens_processed = header.total_tokens;
+    g_system->llm.learning_rate = header.learning_rate;
+    g_system->llm.momentum = header.momentum;
+    g_system->llm.current_word_vocab_size = header.current_word_vocab_size;
+    
+    // Cleanup
+    free(h_char_emb);
+    free(h_word_emb);
+    free(h_word_mask);
+    free(h_pos_emb);
+    free(h_output);
+    free(h_momentum_char);
+    free(h_momentum_word);
+    free(h_momentum_output);
+    free(h_cluster_centers);
+    free(h_token_memberships);
+    free(h_membership_weights);
+    free(h_intersection_matrix);
+    fclose(f);
+    
+    printf("✅ Checkpoint V3 loaded: %s (cycles: %lld, words: %d)\n", 
+           filepath, header.total_cycles, header.current_word_vocab_size);
+    
+    return 0;
+
+cleanup_and_fail:
+    free(h_char_emb);
+    free(h_word_emb);
+    free(h_word_mask);
+    free(h_pos_emb);
+    free(h_output);
+    free(h_momentum_char);
+    free(h_momentum_word);
+    free(h_momentum_output);
+    free(h_cluster_centers);
+    free(h_token_memberships);
+    free(h_membership_weights);
+    free(h_intersection_matrix);
+    fclose(f);
+    return -1;
+}
+int feed_training_batch(const int* tokens, int batch_size) {
+    if (!g_system || !tokens || batch_size <= 0) {
+        fprintf(stderr, "Invalid batch feeding parameters\\n");
+        return -1;
+    }
+    
+    // Temporarily pause self-training
+    OperationMode prev_mode = g_system->current_mode;
+    g_system->current_mode = MODE_EXTERNAL_INPUT;
+    
+    // Process batch in chunks (max sequence length)
+    int processed = 0;
+    while (processed < batch_size) {
+        int chunk_size = (batch_size - processed < MAX_SEQ_LEN) ? 
+                        (batch_size - processed) : MAX_SEQ_LEN;
+        
+        // Copy chunk to device
+        cudaMemcpy(g_system->llm.current_sequence, 
+                   tokens + processed, 
+                   chunk_size * sizeof(int), 
+                   cudaMemcpyHostToDevice);
+        g_system->llm.seq_len = chunk_size;
+        
+        // Run one training cycle using existing training flow
+        dim3 block_emb(EMBED_DIM);
+        dim3 grid_emb(chunk_size);
+        
+        // Forward pass: Embeddings (DUAL)
+        embedding_forward_kernel<<<grid_emb, block_emb>>>(
+            g_system->llm.char_embeddings,
+            g_system->llm.word_embeddings,
+            g_system->llm.word_valid_mask,
+            g_system->llm.pos_embeddings,
+            g_system->llm.current_sequence,
+            g_system->llm.hidden_states,
+            chunk_size,
+            EMBED_DIM
+        );
+        
+        // Forward: Attention (simplified)
+        dim3 grid_attn(chunk_size, NUM_HEADS);
+        attention_forward_kernel<<<grid_attn, 1>>>(
+            g_system->llm.hidden_states,
+            g_system->llm.qkv_weights,
+            g_system->llm.attention_output,
+            chunk_size,
+            EMBED_DIM,
+            NUM_HEADS
+        );
+        
+        // Forward: FFN
+        ffn_forward_kernel<<<grid_emb, block_emb>>>(
+            g_system->llm.attention_output,
+            g_system->llm.ffn_w1,
+            g_system->llm.ffn_w2,
+            g_system->llm.hidden_states,
+            chunk_size,
+            EMBED_DIM
+        );
+        
+        // Forward: Output projection (TOTAL_VOCAB_SIZE)
+        dim3 block_out(256);
+        dim3 grid_out(chunk_size, (TOTAL_VOCAB_SIZE + 255) / 256);
+        output_projection_kernel<<<grid_out, block_out>>>(
+            g_system->llm.hidden_states,
+            g_system->llm.output_weights,
+            g_system->llm.logits,
+            chunk_size,
+            EMBED_DIM,
+            TOTAL_VOCAB_SIZE
+        );
+        
+        // Compute loss
+        cudaMemset(&g_system->llm.current_loss, 0, sizeof(float));
+        dim3 block_loss(256);
+        dim3 grid_loss((chunk_size + 255) / 256);
+        cross_entropy_loss_kernel<<<grid_loss, block_loss>>>(
+            g_system->llm.logits,
+            g_system->llm.current_sequence,
+            &g_system->llm.current_loss,
+            chunk_size,
+            TOTAL_VOCAB_SIZE
+        );
+        
+        // Backward: Output projection (DUAL gradients)
+        cudaMemset(g_system->llm.grad_output_weights, 0, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+        cudaMemset(g_system->llm.grad_hidden_states, 0, chunk_size * EMBED_DIM * sizeof(float));
+        
+        output_projection_backward_kernel<<<grid_out, block_out>>>(
+            g_system->llm.logits,
+            g_system->llm.current_sequence,
+            g_system->llm.hidden_states,
+            g_system->llm.grad_output_weights,
+            g_system->llm.grad_hidden_states,
+            chunk_size,
+            EMBED_DIM,
+            TOTAL_VOCAB_SIZE
+        );
+        
+        // Backward: Embeddings (DUAL)
+        cudaMemset(g_system->llm.grad_char_embeddings, 0, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+        cudaMemset(g_system->llm.grad_word_embeddings, 0, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+        
+        embedding_backward_kernel<<<grid_emb, block_emb>>>(
+            g_system->llm.current_sequence,
+            g_system->llm.grad_hidden_states,
+            g_system->llm.grad_char_embeddings,
+            g_system->llm.grad_word_embeddings,
+            chunk_size,
+            EMBED_DIM
+        );
+        
+        // Update: Output weights
+        int n_params_out = TOTAL_VOCAB_SIZE * EMBED_DIM;
+        dim3 grid_update_out((n_params_out + 255) / 256);
+        
+        sgd_update_kernel<<<grid_update_out, 256>>>(
+            g_system->llm.output_weights,
+            g_system->llm.grad_output_weights,
+            g_system->llm.momentum_output,
+            g_system->llm.learning_rate,
+            g_system->llm.momentum,
+            n_params_out
+        );
+        
+        // Update: Char embeddings (lower LR)
+        int n_params_char = CHAR_VOCAB_SIZE * EMBED_DIM;
+        dim3 grid_update_char((n_params_char + 255) / 256);
+        
+        sgd_update_kernel<<<grid_update_char, 256>>>(
+            g_system->llm.char_embeddings,
+            g_system->llm.grad_char_embeddings,
+            g_system->llm.momentum_char_emb,
+            g_system->llm.learning_rate * 0.1f,
+            g_system->llm.momentum,
+            n_params_char
+        );
+        
+        // Update: Word embeddings (lower LR)
+        int n_params_word = MAX_WORD_VOCAB_SIZE * EMBED_DIM;
+        dim3 grid_update_word((n_params_word + 255) / 256);
+        
+        sgd_update_kernel<<<grid_update_word, 256>>>(
+            g_system->llm.word_embeddings,
+            g_system->llm.grad_word_embeddings,
+            g_system->llm.momentum_word_emb,
+            g_system->llm.learning_rate * 0.1f,
+            g_system->llm.momentum,
+            n_params_word
+        );
+        
+        cudaStreamSynchronize(g_system->gpu.main_stream);
+        
+        processed += chunk_size;
+        g_system->total_tokens_processed += chunk_size;
+    }
+    
+    // Resume previous mode
+    g_system->current_mode = prev_mode;
+    
+    return processed;
+}
+
+// ============================================================================
+// VOCABULARY MANAGEMENT API
+// ============================================================================
+
+int activate_word_token(int word_id, const float* init_embedding) {
+    /**
+     * Attiva un nuovo word token nel vocabolario dinamico.
+     * 
+     * Args:
+     *   word_id: ID del token (>= 256)
+     *   init_embedding: Embedding iniziale [EMBED_DIM]
+     * 
+     * Returns:
+     *   0 se successo, -1 se errore
+     */
+    if (!g_system) {
+        fprintf(stderr, "System not initialized\n");
+        return -1;
+    }
+    
+    if (word_id < CHAR_VOCAB_SIZE) {
+        fprintf(stderr, "Invalid word_id (must be >= %d)\n", CHAR_VOCAB_SIZE);
+        return -1;
+    }
+    
+    int word_idx = word_id - CHAR_VOCAB_SIZE;
+    
+    if (word_idx >= MAX_WORD_VOCAB_SIZE) {
+        fprintf(stderr, "Word index out of range: %d >= %d\n", word_idx, MAX_WORD_VOCAB_SIZE);
+        return -1;
+    }
+    
+    // Copy embedding to device
+    cudaMemcpy(
+        g_system->llm.word_embeddings + word_idx * EMBED_DIM,
+        init_embedding,
+        EMBED_DIM * sizeof(float),
+        cudaMemcpyHostToDevice
+    );
+    
+    // Set valid mask
+    int valid = 1;
+    cudaMemcpy(
+        g_system->llm.word_valid_mask + word_idx,
+        &valid,
+        sizeof(int),
+        cudaMemcpyHostToDevice
+    );
+    
+    // Update count
+    g_system->llm.current_word_vocab_size++;
+    
+    return 0;
+}
+
+int deactivate_word_token(int word_id) {
+    /**
+     * Disattiva un word token (pruning).
+     * 
+     * Args:
+     *   word_id: ID del token da disattivare
+     * 
+     * Returns:
+     *   0 se successo, -1 se errore
+     */
+    if (!g_system) {
+        fprintf(stderr, "System not initialized\n");
+        return -1;
+    }
+    
+    if (word_id < CHAR_VOCAB_SIZE) {
+        fprintf(stderr, "Cannot deactivate char token\n");
+        return -1;
+    }
+    
+    int word_idx = word_id - CHAR_VOCAB_SIZE;
+    
+    if (word_idx >= MAX_WORD_VOCAB_SIZE) {
+        fprintf(stderr, "Word index out of range\n");
+        return -1;
+    }
+    
+    // Clear valid mask
+    int invalid = 0;
+    cudaMemcpy(
+        g_system->llm.word_valid_mask + word_idx,
+        &invalid,
+        sizeof(int),
+        cudaMemcpyHostToDevice
+    );
+    
+    // Update count
+    if (g_system->llm.current_word_vocab_size > 0) {
+        g_system->llm.current_word_vocab_size--;
+    }
+    
+    return 0;
+}
+
+int get_word_embedding(int word_id, float* out_embedding) {
+    /**
+     * Ottieni embedding di un word token.
+     * 
+     * Args:
+     *   word_id: ID del token
+     *   out_embedding: Buffer output [EMBED_DIM]
+     * 
+     * Returns:
+     *   0 se successo, -1 se errore
+     */
+    if (!g_system) {
+        fprintf(stderr, "System not initialized\n");
+        return -1;
+    }
+    
+    if (word_id < CHAR_VOCAB_SIZE) {
+        // Char embedding
+        cudaMemcpy(
+            out_embedding,
+            g_system->llm.char_embeddings + word_id * EMBED_DIM,
+            EMBED_DIM * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+    } else {
+        // Word embedding
+        int word_idx = word_id - CHAR_VOCAB_SIZE;
+        
+        if (word_idx >= MAX_WORD_VOCAB_SIZE) {
+            fprintf(stderr, "Word index out of range\n");
+            return -1;
+        }
+        
+        cudaMemcpy(
+            out_embedding,
+            g_system->llm.word_embeddings + word_idx * EMBED_DIM,
+            EMBED_DIM * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+    }
+    
+    return 0;
+}
+
+int get_current_word_vocab_size(void) {
+    /**
+     * Ottieni numero corrente di word tokens attivi.
+     * 
+     * Returns:
+     *   Numero di word tokens, -1 se errore
+     */
+    if (!g_system) {
+        return -1;
+    }
+    
+    return g_system->llm.current_word_vocab_size;
+}
+
+int sync_vocabulary_state(int* word_ids, int num_words) {
+    /**
+     * Sincronizza stato vocabolario (batch activation).
+     * 
+     * Args:
+     *   word_ids: Array di word IDs da attivare
+     *   num_words: Numero di words
+     * 
+     * Returns:
+     *   Numero di words attivate, -1 se errore
+     */
+    if (!g_system) {
+        fprintf(stderr, "System not initialized\n");
+        return -1;
+    }
+    
+    int activated = 0;
+    
+    for (int i = 0; i < num_words; i++) {
+        int word_id = word_ids[i];
+        int word_idx = word_id - CHAR_VOCAB_SIZE;
+        
+        if (word_idx >= 0 && word_idx < MAX_WORD_VOCAB_SIZE) {
+            // Set valid mask
+            int valid = 1;
+            cudaMemcpy(
+                g_system->llm.word_valid_mask + word_idx,
+                &valid,
+                sizeof(int),
+                cudaMemcpyHostToDevice
+            );
+            activated++;
+        }
+    }
+    
+    g_system->llm.current_word_vocab_size = activated;
+    
+    return activated;
+}
+
+} // extern "C"
+

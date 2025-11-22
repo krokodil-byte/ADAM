@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""
+A.D.A.M TUI - Text User Interface
+Interfaccia visuale completa per gestire il modello
+"""
+
+import curses
+import os
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Handle imports
+try:
+    from core.config import (
+        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG
+    )
+except ImportError:
+    from ..core.config import (
+        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG
+    )
+
+
+class ADAMTUI:
+    """TUI completa per A.D.A.M"""
+
+    def __init__(self):
+        self.current_menu = 'main'
+        self.selected_item = 0
+        self.message = ""
+        self.message_type = "info"
+
+        # Stored values for operations
+        self.values = {
+            'checkpoint': '',
+            'input_file': '',
+            'output_file': '',
+            'passes': 1,
+            'preset': 'default',
+            'language': 'en',
+            'ram_percent': 30.0,
+            'max_articles': 0,
+        }
+
+        # Menu definitions
+        self.menus = {
+            'main': {
+                'title': 'A.D.A.M - Main Menu',
+                'items': [
+                    ('init', '🚀 Initialize System', 'Check CUDA and compile kernels'),
+                    ('train', '🧠 Train on Text', 'Train model on text file'),
+                    ('wikipedia', '📚 Wikipedia Training', 'Train on Wikipedia articles'),
+                    ('dataset', '📂 Dataset Training', 'Train on dataset folder'),
+                    ('chat', '💬 Interactive Chat', 'Chat with the model'),
+                    ('stats', '📊 View Statistics', 'Show model statistics'),
+                    ('settings', '⚙️  Settings', 'Configure model parameters'),
+                    ('quit', '🚪 Exit', 'Exit A.D.A.M'),
+                ]
+            },
+            'train': {
+                'title': 'Train on Text',
+                'items': [
+                    ('input', '📄 Input File', 'Select text file to train on'),
+                    ('output', '💾 Output Checkpoint', 'Where to save the model'),
+                    ('checkpoint', '📦 Load Checkpoint', 'Resume from checkpoint'),
+                    ('passes', '🔄 Passes', 'Number of training passes'),
+                    ('preset', '⚡ Preset', 'Configuration preset'),
+                    ('run', '▶️  Start Training', 'Begin training'),
+                    ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'wikipedia': {
+                'title': 'Wikipedia Training',
+                'items': [
+                    ('language', '🌍 Language', 'Wikipedia language code'),
+                    ('ram', '💾 RAM %', 'Target RAM usage percentage'),
+                    ('articles', '📝 Max Articles', 'Maximum articles (0=unlimited)'),
+                    ('output', '💾 Output Checkpoint', 'Where to save the model'),
+                    ('checkpoint', '📦 Load Checkpoint', 'Resume from checkpoint'),
+                    ('passes', '🔄 Passes per Batch', 'Training passes per batch'),
+                    ('preset', '⚡ Preset', 'Configuration preset'),
+                    ('run', '▶️  Start Training', 'Begin Wikipedia training'),
+                    ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'settings': {
+                'title': 'Settings',
+                'items': [
+                    ('model', '🏗️  Model Architecture', 'Layers, dimensions, heads'),
+                    ('training', '📈 Training Parameters', 'Learning rate, momentum'),
+                    ('system', '🖥️  System', 'CUDA, checkpoints'),
+                    ('save', '💾 Save Settings', 'Save to config file'),
+                    ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+        }
+
+        # Settings data
+        self.settings = self._load_default_settings()
+
+    def _load_default_settings(self) -> Dict[str, Dict[str, Any]]:
+        """Load default settings from config"""
+        return {
+            'model': {
+                'num_layers': MODEL_CONFIG.NUM_LAYERS,
+                'embed_dim': MODEL_CONFIG.EMBED_DIM,
+                'num_heads': MODEL_CONFIG.NUM_HEADS,
+                'max_seq_len': MODEL_CONFIG.MAX_SEQ_LEN,
+                'max_word_vocab_size': MODEL_CONFIG.MAX_WORD_VOCAB_SIZE,
+            },
+            'training': {
+                'base_lr': TRAINING_CONFIG.BASE_LR,
+                'momentum': TRAINING_CONFIG.MOMENTUM,
+                'temperature': TRAINING_CONFIG.EXPLORATION_TEMPERATURE,
+            },
+            'system': {
+                'device_id': RUNTIME_CONFIG.DEVICE_ID,
+                'nvcc_arch': RUNTIME_CONFIG.NVCC_ARCH,
+            }
+        }
+
+    def run(self):
+        """Start TUI"""
+        curses.wrapper(self._main_loop)
+
+    def _main_loop(self, stdscr):
+        """Main curses loop"""
+        curses.curs_set(0)
+        curses.start_color()
+        curses.use_default_colors()
+
+        # Colors
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)
+        curses.init_pair(4, curses.COLOR_RED, -1)
+        curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)
+
+        while True:
+            stdscr.clear()
+            height, width = stdscr.getmaxyx()
+            menu = self.menus[self.current_menu]
+
+            # Draw box
+            self._draw_box(stdscr, 0, 0, height - 3, width - 1)
+
+            # Title
+            title = f" {menu['title']} "
+            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(0, (width - len(title)) // 2, title)
+            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+
+            # Menu items
+            items = menu['items']
+            start_y = 2
+            for i, (key, label, desc) in enumerate(items):
+                y = start_y + i
+                if y >= height - 4:
+                    break
+
+                # Highlight selected
+                if i == self.selected_item:
+                    stdscr.attron(curses.A_REVERSE)
+
+                # Show current value for editable items
+                display = f"  {label}"
+                value = self._get_item_value(key)
+                if value:
+                    display += f": {value}"
+
+                stdscr.addstr(y, 2, display[:width-4])
+
+                if i == self.selected_item:
+                    stdscr.attroff(curses.A_REVERSE)
+
+            # Description
+            if self.selected_item < len(items):
+                desc = items[self.selected_item][2]
+                stdscr.attron(curses.A_DIM)
+                stdscr.addstr(height - 4, 2, f"  {desc}"[:width-4])
+                stdscr.attroff(curses.A_DIM)
+
+            # Message
+            if self.message:
+                color = curses.color_pair(4) if self.message_type == "error" else curses.color_pair(2)
+                stdscr.attron(color)
+                stdscr.addstr(height - 3, 2, self.message[:width-4])
+                stdscr.attroff(color)
+
+            # Footer
+            footer = " [↑↓] Navigate  [Enter] Select  [Q] Quit "
+            stdscr.attron(curses.A_DIM)
+            stdscr.addstr(height - 1, (width - len(footer)) // 2, footer)
+            stdscr.attroff(curses.A_DIM)
+
+            stdscr.refresh()
+
+            # Input
+            key = stdscr.getch()
+
+            if key == ord('q') or key == ord('Q'):
+                if self.current_menu == 'main':
+                    break
+                else:
+                    self.current_menu = 'main'
+                    self.selected_item = 0
+            elif key == curses.KEY_UP:
+                self.selected_item = (self.selected_item - 1) % len(items)
+                self.message = ""
+            elif key == curses.KEY_DOWN:
+                self.selected_item = (self.selected_item + 1) % len(items)
+                self.message = ""
+            elif key in (10, 13):  # Enter
+                self._handle_selection(stdscr, items[self.selected_item][0])
+
+    def _draw_box(self, stdscr, y, x, h, w):
+        """Draw a box"""
+        # Corners
+        stdscr.addch(y, x, curses.ACS_ULCORNER)
+        stdscr.addch(y, w, curses.ACS_URCORNER)
+        stdscr.addch(h, x, curses.ACS_LLCORNER)
+        stdscr.addch(h, w, curses.ACS_LRCORNER)
+
+        # Lines
+        for i in range(x + 1, w):
+            stdscr.addch(y, i, curses.ACS_HLINE)
+            stdscr.addch(h, i, curses.ACS_HLINE)
+        for i in range(y + 1, h):
+            stdscr.addch(i, x, curses.ACS_VLINE)
+            stdscr.addch(i, w, curses.ACS_VLINE)
+
+    def _get_item_value(self, key: str) -> str:
+        """Get display value for menu item"""
+        if key == 'input':
+            return self.values['input_file'] or "(not set)"
+        elif key == 'output':
+            return self.values['output_file'] or "(not set)"
+        elif key == 'checkpoint':
+            return self.values['checkpoint'] or "(none)"
+        elif key == 'passes':
+            return str(self.values['passes'])
+        elif key == 'preset':
+            return self.values['preset']
+        elif key == 'language':
+            return self.values['language']
+        elif key == 'ram':
+            return f"{self.values['ram_percent']}%"
+        elif key == 'articles':
+            return str(self.values['max_articles']) if self.values['max_articles'] else "unlimited"
+        return ""
+
+    def _handle_selection(self, stdscr, key: str):
+        """Handle menu item selection"""
+        # Navigation
+        if key == 'back':
+            self.current_menu = 'main'
+            self.selected_item = 0
+            return
+        elif key == 'quit':
+            return  # Will exit loop
+        elif key in self.menus:
+            self.current_menu = key
+            self.selected_item = 0
+            return
+
+        # Actions
+        if key == 'init':
+            self._run_command(stdscr, 'init')
+        elif key == 'chat':
+            self._run_command(stdscr, 'chat')
+        elif key == 'stats':
+            self._run_command(stdscr, 'stats')
+
+        # Inputs
+        elif key == 'input':
+            value = self._input_dialog(stdscr, "Input File", self.values['input_file'])
+            if value is not None:
+                self.values['input_file'] = value
+        elif key == 'output':
+            value = self._input_dialog(stdscr, "Output Checkpoint", self.values['output_file'])
+            if value is not None:
+                self.values['output_file'] = value
+        elif key == 'checkpoint':
+            value = self._input_dialog(stdscr, "Load Checkpoint", self.values['checkpoint'])
+            if value is not None:
+                self.values['checkpoint'] = value
+        elif key == 'passes':
+            value = self._input_dialog(stdscr, "Passes", str(self.values['passes']))
+            if value is not None:
+                try:
+                    self.values['passes'] = int(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+        elif key == 'preset':
+            presets = ['default', 'fast_learning', 'stable', 'inference', 'research']
+            idx = self._select_dialog(stdscr, "Select Preset", presets)
+            if idx >= 0:
+                self.values['preset'] = presets[idx]
+        elif key == 'language':
+            value = self._input_dialog(stdscr, "Language Code", self.values['language'])
+            if value is not None:
+                self.values['language'] = value
+        elif key == 'ram':
+            value = self._input_dialog(stdscr, "RAM %", str(self.values['ram_percent']))
+            if value is not None:
+                try:
+                    self.values['ram_percent'] = float(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+        elif key == 'articles':
+            value = self._input_dialog(stdscr, "Max Articles (0=unlimited)", str(self.values['max_articles']))
+            if value is not None:
+                try:
+                    self.values['max_articles'] = int(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+
+        # Run commands
+        elif key == 'run':
+            if self.current_menu == 'train':
+                self._run_train(stdscr)
+            elif self.current_menu == 'wikipedia':
+                self._run_wikipedia(stdscr)
+
+        # Settings
+        elif key == 'model':
+            self._edit_settings(stdscr, 'model')
+        elif key == 'training':
+            self._edit_settings(stdscr, 'training')
+        elif key == 'system':
+            self._edit_settings(stdscr, 'system')
+        elif key == 'save':
+            self._save_settings()
+
+    def _input_dialog(self, stdscr, title: str, default: str = "") -> Optional[str]:
+        """Show input dialog"""
+        height, width = stdscr.getmaxyx()
+        dialog_w = min(60, width - 4)
+        dialog_h = 5
+        start_y = (height - dialog_h) // 2
+        start_x = (width - dialog_w) // 2
+
+        curses.curs_set(1)
+        buffer = default
+
+        while True:
+            # Draw dialog
+            stdscr.attron(curses.color_pair(5))
+            for i in range(dialog_h):
+                stdscr.addstr(start_y + i, start_x, " " * dialog_w)
+            stdscr.addstr(start_y, start_x + 2, f" {title} ")
+            stdscr.attroff(curses.color_pair(5))
+
+            # Input field
+            stdscr.addstr(start_y + 2, start_x + 2, "> " + buffer[:dialog_w-6] + "_")
+            stdscr.addstr(start_y + 4, start_x + 2, "[Enter] OK  [Esc] Cancel")
+
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == 27:  # Esc
+                curses.curs_set(0)
+                return None
+            elif key in (10, 13):  # Enter
+                curses.curs_set(0)
+                return buffer
+            elif key in (127, 263):  # Backspace
+                buffer = buffer[:-1]
+            elif 32 <= key <= 126:
+                buffer += chr(key)
+
+    def _select_dialog(self, stdscr, title: str, options: List[str]) -> int:
+        """Show selection dialog"""
+        height, width = stdscr.getmaxyx()
+        dialog_w = min(40, width - 4)
+        dialog_h = len(options) + 4
+        start_y = (height - dialog_h) // 2
+        start_x = (width - dialog_w) // 2
+
+        selected = 0
+
+        while True:
+            # Draw dialog
+            stdscr.attron(curses.color_pair(5))
+            for i in range(dialog_h):
+                stdscr.addstr(start_y + i, start_x, " " * dialog_w)
+            stdscr.addstr(start_y, start_x + 2, f" {title} ")
+            stdscr.attroff(curses.color_pair(5))
+
+            # Options
+            for i, opt in enumerate(options):
+                y = start_y + 2 + i
+                if i == selected:
+                    stdscr.attron(curses.A_REVERSE)
+                stdscr.addstr(y, start_x + 4, opt[:dialog_w-8])
+                if i == selected:
+                    stdscr.attroff(curses.A_REVERSE)
+
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == 27:  # Esc
+                return -1
+            elif key in (10, 13):  # Enter
+                return selected
+            elif key == curses.KEY_UP:
+                selected = (selected - 1) % len(options)
+            elif key == curses.KEY_DOWN:
+                selected = (selected + 1) % len(options)
+
+    def _edit_settings(self, stdscr, category: str):
+        """Edit settings for a category"""
+        height, width = stdscr.getmaxyx()
+        settings = self.settings[category]
+        keys = list(settings.keys())
+        selected = 0
+
+        while True:
+            stdscr.clear()
+            self._draw_box(stdscr, 0, 0, height - 3, width - 1)
+
+            # Title
+            title = f" Settings: {category.title()} "
+            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(0, (width - len(title)) // 2, title)
+            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+
+            # Settings
+            for i, key in enumerate(keys):
+                y = 2 + i
+                if i == selected:
+                    stdscr.attron(curses.A_REVERSE)
+
+                value = settings[key]
+                stdscr.addstr(y, 2, f"  {key}: {value}"[:width-4])
+
+                if i == selected:
+                    stdscr.attroff(curses.A_REVERSE)
+
+            # Footer
+            footer = " [↑↓] Navigate  [Enter] Edit  [Q] Back "
+            stdscr.attron(curses.A_DIM)
+            stdscr.addstr(height - 1, (width - len(footer)) // 2, footer)
+            stdscr.attroff(curses.A_DIM)
+
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key == ord('q') or key == ord('Q'):
+                break
+            elif key == curses.KEY_UP:
+                selected = (selected - 1) % len(keys)
+            elif key == curses.KEY_DOWN:
+                selected = (selected + 1) % len(keys)
+            elif key in (10, 13):
+                setting_key = keys[selected]
+                current = str(settings[setting_key])
+                new_value = self._input_dialog(stdscr, setting_key, current)
+                if new_value is not None:
+                    try:
+                        # Convert to appropriate type
+                        old_value = settings[setting_key]
+                        if isinstance(old_value, int):
+                            settings[setting_key] = int(new_value)
+                        elif isinstance(old_value, float):
+                            settings[setting_key] = float(new_value)
+                        else:
+                            settings[setting_key] = new_value
+                    except ValueError:
+                        pass
+
+    def _save_settings(self):
+        """Save settings to file"""
+        config_path = Path.home() / ".config" / "adam" / "settings.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(self.settings, f, indent=2)
+            self.message = f"✓ Saved to {config_path}"
+            self.message_type = "success"
+        except Exception as e:
+            self.message = f"✗ Save failed: {e}"
+            self.message_type = "error"
+
+    def _run_command(self, stdscr, cmd: str):
+        """Run a CLI command"""
+        curses.endwin()
+
+        # Build command
+        if cmd == 'init':
+            os.system('vectllm init')
+        elif cmd == 'chat':
+            ckpt = f"-c {self.values['checkpoint']}" if self.values['checkpoint'] else ""
+            os.system(f"vectllm chat {ckpt}")
+        elif cmd == 'stats':
+            ckpt = f"-c {self.values['checkpoint']}" if self.values['checkpoint'] else ""
+            os.system(f"vectllm stats {ckpt}")
+
+        input("\nPress Enter to continue...")
+        stdscr.clear()
+        stdscr.refresh()
+
+    def _run_train(self, stdscr):
+        """Run training command"""
+        if not self.values['input_file']:
+            self.message = "✗ Input file required"
+            self.message_type = "error"
+            return
+
+        curses.endwin()
+
+        # Build command
+        cmd = f"vectllm train {self.values['input_file']}"
+        if self.values['output_file']:
+            cmd += f" -o {self.values['output_file']}"
+        if self.values['checkpoint']:
+            cmd += f" -c {self.values['checkpoint']}"
+        cmd += f" -p {self.values['passes']}"
+        cmd += f" --preset {self.values['preset']}"
+
+        print(f"\n$ {cmd}\n")
+        os.system(cmd)
+
+        input("\nPress Enter to continue...")
+        stdscr.clear()
+        stdscr.refresh()
+
+    def _run_wikipedia(self, stdscr):
+        """Run Wikipedia training"""
+        curses.endwin()
+
+        # Build command
+        cmd = "vectllm wikipedia"
+        if self.values['output_file']:
+            cmd += f" -o {self.values['output_file']}"
+        if self.values['checkpoint']:
+            cmd += f" -c {self.values['checkpoint']}"
+        cmd += f" -p {self.values['passes']}"
+        cmd += f" --language {self.values['language']}"
+        cmd += f" --ram-percent {self.values['ram_percent']}"
+        if self.values['max_articles']:
+            cmd += f" --max-articles {self.values['max_articles']}"
+        cmd += f" --preset {self.values['preset']}"
+
+        print(f"\n$ {cmd}\n")
+        os.system(cmd)
+
+        input("\nPress Enter to continue...")
+        stdscr.clear()
+        stdscr.refresh()
+
+
+def run_settings_tui():
+    """Legacy function - runs full TUI now"""
+    tui = ADAMTUI()
+    tui.run()
+    return tui.settings
+
+
+def run_adam_tui():
+    """Run the full A.D.A.M TUI"""
+    tui = ADAMTUI()
+    tui.run()
+
+
+if __name__ == '__main__':
+    run_adam_tui()

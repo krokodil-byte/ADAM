@@ -1,0 +1,26 @@
+vectllm/
+├── kernels/
+│   └── brain.cu                 # Kernel CUDA completo (FATTO ✓)
+│
+├── core/
+│   ├── __init__.py              #(FATTO ✓)
+│   ├── config.py                # Configurazioni e presets(FATTO ✓)
+│   ├── vocabulary.py            # NEW: Vocabolario dinamico(FATTO ✓)
+│   ├── brain_wrapper.py         # Wrapper Python → CUDA (via ctypes)(FATTO ✓)
+│   └── stats.py                 # Metrics e monitoring
+│
+├── modules/
+│   ├── __init__.py
+│   ├── chat.py                  # Modalità chat interattiva
+│   ├── training.py              # Multi-pass training logic
+│   ├── dataset_training.py      # DatasetLoader/Trainer (da file esistente)
+│   └── wikipedia_training.py    # WikiMediator/Trainer (da file esistente)
+│
+├── cli/
+│   └── vectllm.py               # CLI unificata (argparse)
+│
+└── utils/
+    ├── __init__.py
+    ├── checkpoint.py            # Load/save checkpoint
+    ├── compiler.py              # Auto-compilazione CUDA
+    └── tokenizer.py             # Char-level + gestione spazi

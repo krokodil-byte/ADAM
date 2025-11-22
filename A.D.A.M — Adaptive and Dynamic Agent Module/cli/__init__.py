@@ -1,0 +1,3 @@
+"""
+VectLLM CLI Module
+"""
