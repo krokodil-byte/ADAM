@@ -22,11 +22,13 @@ try:
     from core.stats import StatsCollector
     from core.pipeline import PipelinedTrainer
     from Utils.checkpoint import CheckpointManager
+    from modules.training_logger import get_logger
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
     from ..core.pipeline import PipelinedTrainer
     from ..utils.checkpoint import CheckpointManager
+    from ..modules.training_logger import get_logger
 
 # Try to import pyarrow for Parquet support
 try:
@@ -80,10 +82,11 @@ class DatasetLoader:
             raise ValueError(f"Path not found: {self.path}")
         
         # Filter by size
-        self.files = [f for f in self.files 
+        self.files = [f for f in self.files
                      if f.stat().st_size <= self.max_file_size]
-        
-        print(f"📂 Found {len(self.files)} files")
+
+        logger = get_logger()
+        logger.info(f"Found {len(self.files)} files")
     
     def load_file(self, filepath: Path) -> str:
         """
@@ -99,7 +102,8 @@ class DatasetLoader:
             with open(filepath, 'r', encoding=self.encoding, errors='ignore') as f:
                 return f.read()
         except Exception as e:
-            print(f"⚠️  Error loading {filepath.name}: {e}")
+            logger = get_logger()
+            logger.warning(f"Error loading {filepath.name}: {e}")
             return ""
     
     def iter_files(self) -> Iterator[tuple]:
@@ -177,7 +181,8 @@ class HFDatasetLoader:
 
         # Detect format
         self.format = self._detect_format()
-        print(f"📊 Dataset format: {self.format}")
+        self.logger = get_logger()
+        self.logger.info(f"Dataset format: {self.format}")
 
         # Load and detect columns
         self.samples: List[str] = []
@@ -310,7 +315,7 @@ class HFDatasetLoader:
 
     def _load_dataset(self):
         """Load dataset and format samples"""
-        print(f"📥 Loading dataset: {self.path.name}")
+        self.logger.info(f"Loading dataset: {self.path.name}")
 
         # Load raw data
         if self.format == 'jsonl':
@@ -325,18 +330,18 @@ class HFDatasetLoader:
             raw_data = []
 
         if not raw_data:
-            print("   ⚠️  No data loaded")
+            self.logger.warning("No data loaded")
             return
 
         # Detect columns
         input_col, output_col, text_col = self._detect_columns(raw_data)
 
         if input_col and output_col:
-            print(f"   Columns: {input_col} → {output_col}")
+            self.logger.info(f"  Columns: {input_col} -> {output_col}")
         elif text_col:
-            print(f"   Column: {text_col}")
+            self.logger.info(f"  Column: {text_col}")
         else:
-            print("   ⚠️  Could not detect columns, using all text fields")
+            self.logger.warning("Could not detect columns, using all text fields")
 
         # Format samples
         for row in raw_data:
@@ -344,7 +349,7 @@ class HFDatasetLoader:
             if text:
                 self.samples.append(text)
 
-        print(f"   ✅ Loaded {len(self.samples)} samples")
+        self.logger.info(f"  Loaded {len(self.samples)} samples")
 
     def iter_samples(self) -> Iterator[Tuple[int, str]]:
         """
@@ -387,6 +392,7 @@ class HFDatasetTrainer:
         self.loader = dataset_loader
         self.stats = stats_collector or StatsCollector()
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
+        self.logger = get_logger()
 
     def train(self,
               passes: int = 1,
@@ -410,13 +416,14 @@ class HFDatasetTrainer:
         dataset_stats = self.loader.get_stats()
 
         if verbose:
-            print("🎓 Starting HuggingFace dataset training")
-            print(f"   Samples: {dataset_stats['num_samples']}")
-            print(f"   Format: {dataset_stats['format']}")
-            print(f"   Avg length: {dataset_stats['avg_sample_length']:.0f} chars")
-            print(f"   Passes: {passes}")
-            print(f"   Pipeline mode: {'enabled' if use_pipeline else 'disabled'}")
-            print()
+            self.logger.training_start(
+                "HuggingFace Dataset",
+                samples=dataset_stats['num_samples'],
+                format=dataset_stats['format'],
+                avg_length=f"{dataset_stats['avg_sample_length']:.0f} chars",
+                passes=passes,
+                pipeline='enabled' if use_pipeline else 'disabled'
+            )
 
         total_tokens = 0
         samples_processed = 0
@@ -425,7 +432,7 @@ class HFDatasetTrainer:
         try:
             for pass_num in range(1, passes + 1):
                 if verbose:
-                    print(f"=== Pass {pass_num}/{passes} ===")
+                    self.logger.pass_start(pass_num, passes)
 
                 pass_start = time.time()
                 pass_tokens = 0
@@ -451,19 +458,17 @@ class HFDatasetTrainer:
                         # Progress update
                         if verbose and (idx + 1) % 100 == 0:
                             brain_stats = self.brain.get_stats()
-                            elapsed = time.time() - pass_start
-                            speed = pass_tokens / elapsed if elapsed > 0 else 0
-                            print(f"   Sample {idx + 1}/{dataset_stats['num_samples']}: "
-                                  f"Loss={brain_stats['loss']:.4f}, "
-                                  f"Vocab={brain_stats['vocab_words']}, "
-                                  f"Speed={speed:.0f} tok/s")
+                            self.logger.sample_progress(
+                                idx + 1, dataset_stats['num_samples'],
+                                pass_tokens, brain_stats['loss']
+                            )
 
                         # Auto-save
                         if (idx + 1) % auto_save_every == 0:
                             ckpt_name = f"hf_pass{pass_num}_sample{idx + 1}.ckpt"
                             ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
                             if verbose:
-                                print(f"   💾 Auto-saving: {ckpt_name}")
+                                self.logger.checkpoint_save(ckpt_name)
                             self.brain.save_checkpoint(str(ckpt_path))
 
                         # Update stats
@@ -478,27 +483,23 @@ class HFDatasetTrainer:
                 total_tokens += pass_tokens
                 pass_time = time.time() - pass_start
                 if verbose:
-                    print(f"\n   ✅ Pass {pass_num} complete: {pass_tokens:,} tokens in {pass_time/60:.1f}m")
+                    self.logger.pass_end(pass_num, pass_tokens, pass_time)
 
         except KeyboardInterrupt:
-            print("\n\n⚠️  Training interrupted by user")
+            self.logger.interrupted()
 
         # Final stats
         elapsed = time.time() - start_time
         final_stats = self.stats.get_summary()
 
         if verbose:
-            print("\n" + "=" * 70)
-            print("🎉 HuggingFace dataset training complete!")
-            print("=" * 70)
-            print(f"Samples: {samples_processed}")
-            print(f"Tokens: {total_tokens:,}")
-            print(f"Time: {elapsed/60:.1f} minutes")
-            if elapsed > 0:
-                print(f"Speed: {total_tokens/elapsed:.0f} tokens/sec")
-            print(f"Loss: {final_stats['loss']:.4f}")
-            print(f"Vocab: {final_stats['vocab_size']:,} words")
-            print()
+            self.logger.training_end(
+                samples=samples_processed,
+                tokens=total_tokens,
+                speed=total_tokens/elapsed if elapsed > 0 else 0,
+                loss=final_stats['loss'],
+                vocab=final_stats['vocab_size']
+            )
 
         return final_stats
 
@@ -542,12 +543,10 @@ class HFDatasetTrainer:
             # Progress update
             if verbose and idx % 100 == 0:
                 brain_stats = self.brain.get_stats()
-                elapsed = time.time() - pass_start
-                speed = tokens / elapsed if elapsed > 0 else 0
-                print(f"   Sample {idx}/{dataset_stats['num_samples']}: "
-                      f"Loss={brain_stats['loss']:.4f}, "
-                      f"Vocab={brain_stats['vocab_words']}, "
-                      f"Speed={speed:.0f} tok/s")
+                self.logger.sample_progress(
+                    idx, dataset_stats['num_samples'],
+                    tokens, brain_stats['loss']
+                )
 
             # Auto-save check
             if idx % auto_save_every == 0 and idx > last_save_idx[0]:
@@ -555,7 +554,7 @@ class HFDatasetTrainer:
                 ckpt_name = f"hf_pass{pass_num}_sample{idx}.ckpt"
                 ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
                 if verbose:
-                    print(f"   💾 Auto-saving: {ckpt_name}")
+                    self.logger.checkpoint_save(ckpt_name)
                 self.brain.save_checkpoint(str(ckpt_path))
 
             # Update stats
@@ -573,8 +572,10 @@ class HFDatasetTrainer:
         # Get pipeline stats
         pipeline_stats = trainer.get_stats()
         if verbose:
-            print(f"   Pipeline stats: {pipeline_stats['throughput_tok_s']:.0f} tok/s, "
-                  f"avg batch: {pipeline_stats['avg_tokens_per_batch']:.0f} tokens")
+            self.logger.pipeline_stats(
+                pipeline_stats['throughput_tok_s'],
+                pipeline_stats.get('gpu_utilization', 0)
+            )
 
         return pass_tokens
 
@@ -598,7 +599,8 @@ class DatasetTrainer:
         self.loader = dataset_loader
         self.stats = stats_collector or StatsCollector()
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
-    
+        self.logger = get_logger()
+
     def train(self,
               passes: int = 1,
               auto_save_every: Optional[int] = None,
@@ -619,20 +621,20 @@ class DatasetTrainer:
         dataset_stats = self.loader.get_stats()
         
         if verbose:
-            print("🎓 Starting dataset training")
-            print(f"   Files: {dataset_stats['num_files']}")
-            print(f"   Size: {dataset_stats['total_size_mb']:.1f} MB")
-            print(f"   Passes: {passes}")
-            if auto_save_every:
-                print(f"   Auto-save: every {auto_save_every} files")
-            print()
+            self.logger.training_start(
+                "Dataset",
+                files=dataset_stats['num_files'],
+                size=f"{dataset_stats['total_size_mb']:.1f} MB",
+                passes=passes,
+                auto_save=f"every {auto_save_every} files" if auto_save_every else "disabled"
+            )
         
         total_tokens = 0
         files_processed = 0
         
         for pass_num in range(1, passes + 1):
             if verbose:
-                print(f"=== Pass {pass_num}/{passes} ===")
+                self.logger.pass_start(pass_num, passes)
             
             pass_start = time.time()
             
@@ -642,8 +644,7 @@ class DatasetTrainer:
                     continue
                 
                 if verbose:
-                    print(f"\n📄 File {file_idx}/{dataset_stats['num_files']}: {filepath.name}")
-                    print(f"   Size: {len(content):,} chars")
+                    self.logger.file_start(file_idx, dataset_stats['num_files'], filepath.name, len(content))
                 
                 # Train on file
                 file_start = time.time()
@@ -663,43 +664,33 @@ class DatasetTrainer:
                 )
                 
                 if verbose:
-                    tokens_per_sec = processed / file_time if file_time > 0 else 0
-                    print(f"   Processed: {processed:,} tokens in {file_time:.1f}s")
-                    print(f"   Speed: {tokens_per_sec:.0f} tokens/sec")
-                    print(f"   Loss: {brain_stats['loss']:.4f} {self.stats.get_loss_trend()}")
-                    print(f"   Vocab: {brain_stats['vocab_words']:,} words")
-                
+                    self.logger.file_end(processed, file_time, brain_stats['loss'], brain_stats['vocab_words'])
+
                 # Auto-save
                 if auto_save_every and file_idx % auto_save_every == 0:
                     ckpt_name = f"dataset_pass{pass_num}_file{file_idx}.ckpt"
                     ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
-                    
+
                     if verbose:
-                        print(f"   💾 Auto-saving: {ckpt_name}")
-                    
+                        self.logger.checkpoint_save(ckpt_name)
+
                     self.brain.save_checkpoint(str(ckpt_path))
             
             pass_time = time.time() - pass_start
-            
+
             if verbose:
-                print(f"\n✅ Pass {pass_num} complete in {pass_time/60:.1f} minutes")
-                print(f"   Files: {dataset_stats['num_files']}")
-                print(f"   Tokens: {total_tokens:,}")
-                print(f"   Avg speed: {total_tokens/pass_time:.0f} tokens/sec")
-                print()
+                self.logger.pass_end(pass_num, total_tokens, pass_time)
         
         # Final stats
         final_stats = self.stats.get_summary()
         
         if verbose:
-            print("=" * 70)
-            print("🎉 Dataset training complete!")
-            print("=" * 70)
-            print(f"Files processed: {files_processed}")
-            print(f"Total tokens: {total_tokens:,}")
-            print(f"Final loss: {final_stats['loss']:.4f}")
-            print(f"Final vocab: {final_stats['vocab_size']:,} words")
-            print()
+            self.logger.training_end(
+                files=files_processed,
+                tokens=total_tokens,
+                loss=final_stats['loss'],
+                vocab=final_stats['vocab_size']
+            )
         
         return final_stats
 
