@@ -138,30 +138,26 @@ class InteractiveChat:
     
     def _generate_response(self, user_message: str) -> str:
         """
-        Genera risposta (placeholder).
-        
-        TODO: Implementare vera generazione quando sarà pronta.
-        Per ora: echo + info model.
-        
+        Genera risposta usando il modello con continuation bias.
+
+        La generazione si ferma automaticamente quando la confidenza
+        del modello scende sotto una soglia (continuation bias).
+
         Args:
             user_message: Messaggio utente
-            
+
         Returns:
             Risposta generata
         """
-        # Placeholder - vera generazione verrà implementata
-        stats = self.brain.get_stats()
-        
-        responses = [
-            f"I processed your message. Current loss: {stats['loss']:.3f}",
-            f"Interesting! I'm learning from this. Vocab: {stats['vocab_words']} words",
-            f"Thanks for the input! Perplexity: {stats['perplexity']:.2f}",
-            f"Got it. Training cycles: {stats['cycles']:,}",
-        ]
-        
-        # Simple hash-based selection
-        idx = hash(user_message) % len(responses)
-        return responses[idx]
+        # Use the brain's generate_text with continuation bias
+        response = self.brain.generate_text(user_message)
+
+        # If generation failed or empty, provide fallback
+        if not response or len(response.strip()) == 0:
+            stats = self.brain.get_stats()
+            return f"[Training... Loss: {stats['loss']:.3f}, Vocab: {stats['vocab_words']} words]"
+
+        return response.strip()
     
     def _show_stats(self):
         """Mostra statistiche correnti"""

@@ -14,7 +14,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG
+from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG
 from .vocabulary import DynamicVocabulary
 
 
@@ -248,6 +248,26 @@ class VectLLMBrain:
             ctypes.c_int
         ]
         self.lib.sync_vocabulary_state.restype = ctypes.c_int
+
+        # GENERATION API
+        # generate_next_token
+        self.lib.generate_next_token.argtypes = [
+            ctypes.POINTER(ctypes.c_int),  # input_tokens
+            ctypes.c_int,                   # num_tokens
+            ctypes.c_float,                 # temperature
+            ctypes.POINTER(ctypes.c_float)  # out_prob
+        ]
+        self.lib.generate_next_token.restype = ctypes.c_int
+
+        # get_token_probabilities
+        self.lib.get_token_probabilities.argtypes = [
+            ctypes.POINTER(ctypes.c_int),   # input_tokens
+            ctypes.c_int,                   # num_tokens
+            ctypes.c_float,                 # temperature
+            ctypes.POINTER(ctypes.c_float), # out_probs
+            ctypes.c_int                    # max_vocab
+        ]
+        self.lib.get_token_probabilities.restype = ctypes.c_int
     
     def __enter__(self):
         self.start()
@@ -469,7 +489,7 @@ class VectLLMBrain:
         momentum = ctypes.c_float()
         loss = ctypes.c_float()
         perplexity = ctypes.c_float()
-        
+
         self.lib.get_stats(
             ctypes.byref(cycles),
             ctypes.byref(tokens),
@@ -478,7 +498,7 @@ class VectLLMBrain:
             ctypes.byref(loss),
             ctypes.byref(perplexity)
         )
-        
+
         return {
             'cycles': cycles.value,
             'tokens': tokens.value,
@@ -490,6 +510,102 @@ class VectLLMBrain:
             'vocab_words': len(self.vocab.word_to_id),
             'vocab_utilization': len(self.vocab.word_to_id) / self.vocab.max_word_vocab_size,
         }
+
+    def generate_token(self, tokens: List[int], temperature: float = None) -> tuple:
+        """
+        Genera il prossimo token con probabilità.
+
+        Args:
+            tokens: Lista di token IDs come contesto
+            temperature: Temperature per sampling (default da config)
+
+        Returns:
+            (token_id, probability)
+        """
+        if not self.initialized or not tokens:
+            return (-1, 0.0)
+
+        if temperature is None:
+            temperature = GENERATION_CONFIG.TEMPERATURE
+
+        # Convert to ctypes array
+        token_array = (ctypes.c_int * len(tokens))(*tokens)
+        out_prob = ctypes.c_float()
+
+        # Generate
+        token_id = self.lib.generate_next_token(
+            token_array,
+            len(tokens),
+            temperature,
+            ctypes.byref(out_prob)
+        )
+
+        return (token_id, out_prob.value)
+
+    def generate_text(self, prompt: str, max_tokens: int = None) -> str:
+        """
+        Genera testo con continuation bias.
+        Si ferma quando la confidenza scende sotto soglia.
+
+        Args:
+            prompt: Testo di input
+            max_tokens: Massimo token da generare (default da config)
+
+        Returns:
+            Testo generato
+        """
+        if not self.initialized:
+            return ""
+
+        if max_tokens is None:
+            max_tokens = GENERATION_CONFIG.MAX_TOKENS
+
+        # Encode prompt
+        tokens = self.encode_text(prompt)
+        if not tokens:
+            return ""
+
+        # Generation state
+        generated_tokens = []
+        confidence_avg = 1.0
+        low_confidence_streak = 0
+
+        for i in range(max_tokens):
+            # Generate next token
+            token_id, prob = self.generate_token(tokens)
+
+            if token_id < 0:
+                break
+
+            # Add to sequence
+            tokens.append(token_id)
+            generated_tokens.append(token_id)
+
+            # Update confidence average (exponential moving average)
+            confidence_avg = GENERATION_CONFIG.CONFIDENCE_DECAY * confidence_avg + \
+                           (1 - GENERATION_CONFIG.CONFIDENCE_DECAY) * prob
+
+            # Check for low confidence (skip first few tokens)
+            if i >= GENERATION_CONFIG.MIN_TOKENS:
+                if prob < GENERATION_CONFIG.MIN_TOKEN_CONFIDENCE:
+                    low_confidence_streak += 1
+                    if low_confidence_streak >= GENERATION_CONFIG.LOW_CONFIDENCE_STREAK:
+                        # Stop generation - confidence too low
+                        break
+                else:
+                    low_confidence_streak = 0
+
+            # Check for stop tokens
+            decoded_char = self.vocab.decode([token_id])
+
+            if GENERATION_CONFIG.STOP_ON_NEWLINE and decoded_char == '\n\n':
+                break
+
+            if GENERATION_CONFIG.STOP_ON_PERIOD and decoded_char.endswith('.'):
+                break
+
+        # Decode generated tokens
+        return self.vocab.decode(generated_tokens)
     
     def save_checkpoint(self, filepath: str, save_vocab: bool = True) -> bool:
         """

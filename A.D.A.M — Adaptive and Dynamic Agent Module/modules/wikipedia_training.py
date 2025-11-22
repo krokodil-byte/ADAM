@@ -545,6 +545,7 @@ class WikipediaStreamTrainer:
                         # Train
                         processed = self.brain.train_on_text(text, passes=1)
                         batch_tokens += processed
+                        total_tokens += processed  # Update total immediately
 
                         if pass_num == 1:
                             articles_processed += 1
@@ -565,17 +566,18 @@ class WikipediaStreamTrainer:
 
                             self.brain.save_checkpoint(str(ckpt_path))
 
-                total_tokens += batch_tokens
+                        # Update stats after each article for accurate interrupt reporting
+                        brain_stats = self.brain.get_stats()
+                        self.stats.update(
+                            cycles=brain_stats['cycles'],
+                            tokens=brain_stats['tokens'],
+                            loss=brain_stats['loss'],
+                            vocab_size=brain_stats['vocab_words']
+                        )
                 batch_time = time.time() - batch_start
 
-                # Update stats
+                # Get latest stats for display
                 brain_stats = self.brain.get_stats()
-                self.stats.update(
-                    cycles=brain_stats['cycles'],
-                    tokens=brain_stats['tokens'],
-                    loss=brain_stats['loss'],
-                    vocab_size=brain_stats['vocab_words']
-                )
 
                 if verbose:
                     tokens_per_sec = batch_tokens / batch_time if batch_time > 0 else 0

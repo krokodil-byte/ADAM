@@ -13,11 +13,13 @@ from typing import Any, Dict, List, Optional
 # Handle imports
 try:
     from core.config import (
-        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG, PERFORMANCE_CONFIG
+        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG,
+        PERFORMANCE_CONFIG, GENERATION_CONFIG
     )
 except ImportError:
     from ..core.config import (
-        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG, PERFORMANCE_CONFIG
+        MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG,
+        PERFORMANCE_CONFIG, GENERATION_CONFIG
     )
 
 
@@ -88,10 +90,25 @@ class ADAMTUI:
                 'items': [
                     ('model', '🏗️  Model Architecture', 'Layers, dimensions, heads'),
                     ('training', '📈 Training Parameters', 'Learning rate, momentum'),
+                    ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU optimizations, pipeline, kernels'),
                     ('system', '🖥️  System', 'CUDA, checkpoints'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'generation': {
+                'title': 'Generation Settings (Continuation Bias)',
+                'items': [
+                    ('temperature', '🌡️  Temperature', 'Sampling temperature (higher = more random)'),
+                    ('min_confidence', '📉 Min Confidence', 'Stop when token probability below this'),
+                    ('confidence_decay', '📊 Confidence Decay', 'EMA decay for confidence tracking'),
+                    ('low_streak', '🔢 Low Confidence Streak', 'Stop after N low confidence tokens'),
+                    ('max_tokens', '📏 Max Tokens', 'Maximum tokens per response'),
+                    ('min_tokens', '📐 Min Tokens', 'Minimum before confidence check'),
+                    ('stop_newline', '↵ Stop on Newline', 'Stop on double newline'),
+                    ('stop_period', '• Stop on Period', 'Stop on sentence end'),
+                    ('back', '← Back', 'Return to settings'),
                 ]
             },
             'performance': {
@@ -135,6 +152,16 @@ class ADAMTUI:
                 'pinned': PERFORMANCE_CONFIG.USE_PINNED_MEMORY,
                 'warp': PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES,
                 'target': PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET,
+            },
+            'generation': {
+                'temperature': GENERATION_CONFIG.TEMPERATURE,
+                'min_confidence': GENERATION_CONFIG.MIN_TOKEN_CONFIDENCE,
+                'confidence_decay': GENERATION_CONFIG.CONFIDENCE_DECAY,
+                'low_streak': GENERATION_CONFIG.LOW_CONFIDENCE_STREAK,
+                'max_tokens': GENERATION_CONFIG.MAX_TOKENS,
+                'min_tokens': GENERATION_CONFIG.MIN_TOKENS,
+                'stop_newline': GENERATION_CONFIG.STOP_ON_NEWLINE,
+                'stop_period': GENERATION_CONFIG.STOP_ON_PERIOD,
             },
             'system': {
                 'device_id': RUNTIME_CONFIG.DEVICE_ID,
@@ -353,6 +380,10 @@ class ADAMTUI:
             self._edit_settings(stdscr, 'model')
         elif key == 'training':
             self._edit_settings(stdscr, 'training')
+        elif key == 'generation':
+            self._edit_settings(stdscr, 'generation')
+        elif key == 'performance':
+            self._edit_settings(stdscr, 'performance')
         elif key == 'system':
             self._edit_settings(stdscr, 'system')
         elif key == 'save':
