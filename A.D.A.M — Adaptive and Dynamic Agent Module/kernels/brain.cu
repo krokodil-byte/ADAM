@@ -493,6 +493,7 @@ void cublas_output_projection(
 __global__ void cross_entropy_loss_kernel(
     const float* logits,
     const int* targets,
+    const int* word_valid_mask,  // Mask for valid word tokens
     float* loss_out,
     int seq_len,
     int total_vocab_size
@@ -508,17 +509,26 @@ __global__ void cross_entropy_loss_kernel(
         int target = targets[pos + 1];
 
         if (target >= 0 && target < total_vocab_size) {
-            // Find max logit for numerical stability (online)
+            // Find max logit for numerical stability (only valid tokens)
             float max_logit = -1e9f;
             for (int v = 0; v < total_vocab_size; v++) {
-                float logit = logits[pos * total_vocab_size + v];
-                if (logit > max_logit) max_logit = logit;
+                // Check if token is valid: char tokens always valid, word tokens check mask
+                bool is_valid = (v < CHAR_VOCAB_SIZE) ||
+                               (word_valid_mask[v - CHAR_VOCAB_SIZE] == 1);
+                if (is_valid) {
+                    float logit = logits[pos * total_vocab_size + v];
+                    if (logit > max_logit) max_logit = logit;
+                }
             }
 
-            // Compute sum of exponentials
+            // Compute sum of exponentials (only valid tokens)
             float sum_exp = 0.0f;
             for (int v = 0; v < total_vocab_size; v++) {
-                sum_exp += expf(logits[pos * total_vocab_size + v] - max_logit);
+                bool is_valid = (v < CHAR_VOCAB_SIZE) ||
+                               (word_valid_mask[v - CHAR_VOCAB_SIZE] == 1);
+                if (is_valid) {
+                    sum_exp += expf(logits[pos * total_vocab_size + v] - max_logit);
+                }
             }
 
             // Log probability of target
@@ -658,6 +668,7 @@ __global__ void cross_entropy_loss_fused_kernel(
 __global__ void output_projection_backward_kernel(
     const float* logits,
     const int* targets,
+    const int* word_valid_mask,  // Mask for valid word tokens
     const float* hidden_states,
     float* grad_output_weights,
     float* grad_hidden,
@@ -670,18 +681,33 @@ __global__ void output_projection_backward_kernel(
 
     if (pos >= seq_len - 1 || vocab_idx >= total_vocab_size) return;
 
+    // Check if current vocab_idx is valid
+    bool current_valid = (vocab_idx < CHAR_VOCAB_SIZE) ||
+                        (word_valid_mask[vocab_idx - CHAR_VOCAB_SIZE] == 1);
+
+    // Skip gradient computation for invalid tokens
+    if (!current_valid) return;
+
     int target = targets[pos + 1];
 
-    // Softmax gradient - compute once per vocab_idx
+    // Softmax gradient - compute only over valid tokens
     float max_logit = -1e9f;
     for (int v = 0; v < total_vocab_size; v++) {
-        float logit = logits[pos * total_vocab_size + v];
-        if (logit > max_logit) max_logit = logit;
+        bool is_valid = (v < CHAR_VOCAB_SIZE) ||
+                       (word_valid_mask[v - CHAR_VOCAB_SIZE] == 1);
+        if (is_valid) {
+            float logit = logits[pos * total_vocab_size + v];
+            if (logit > max_logit) max_logit = logit;
+        }
     }
 
     float sum_exp = 0.0f;
     for (int v = 0; v < total_vocab_size; v++) {
-        sum_exp += expf(logits[pos * total_vocab_size + v] - max_logit);
+        bool is_valid = (v < CHAR_VOCAB_SIZE) ||
+                       (word_valid_mask[v - CHAR_VOCAB_SIZE] == 1);
+        if (is_valid) {
+            sum_exp += expf(logits[pos * total_vocab_size + v] - max_logit);
+        }
     }
 
     float prob = expf(logits[pos * total_vocab_size + vocab_idx] - max_logit) / sum_exp;
@@ -699,9 +725,13 @@ __global__ void output_projection_backward_kernel(
         for (int d = 0; d < embed_dim; d++) {
             float grad_h = 0.0f;
             for (int v = 0; v < total_vocab_size; v++) {
-                float p = expf(logits[pos * total_vocab_size + v] - max_logit) / sum_exp;
-                float g = (v == target) ? p - 1.0f : p;
-                grad_h += g;  // Placeholder
+                bool is_valid = (v < CHAR_VOCAB_SIZE) ||
+                               (word_valid_mask[v - CHAR_VOCAB_SIZE] == 1);
+                if (is_valid) {
+                    float p = expf(logits[pos * total_vocab_size + v] - max_logit) / sum_exp;
+                    float g = (v == target) ? p - 1.0f : p;
+                    grad_h += g;
+                }
             }
             grad_hidden[pos * embed_dim + d] = grad_h / (seq_len - 1);
         }
@@ -1377,11 +1407,12 @@ void* background_self_training(void* arg) {
             cudaMemsetAsync(&system->llm.current_loss, 0, sizeof(float), 
                            system->gpu.main_stream);
             
-            // Compute cross-entropy
+            // Compute cross-entropy (only over valid tokens)
             dim3 grid_loss((seq_len + 255) / 256);
             cross_entropy_loss_kernel<<<grid_loss, 256, 0, system->gpu.main_stream>>>(
                 system->llm.logits,
                 system->llm.current_sequence,
+                system->llm.word_valid_mask,
                 &system->llm.current_loss,
                 seq_len,
                 TOTAL_VOCAB_SIZE
@@ -1401,12 +1432,13 @@ void* background_self_training(void* arg) {
                            MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float),
                            system->gpu.main_stream);
             
-            // Backward through output projection
+            // Backward through output projection (only valid tokens)
             dim3 block_backward(256);
             dim3 grid_backward(seq_len, (TOTAL_VOCAB_SIZE + 255) / 256);
             output_projection_backward_kernel<<<grid_backward, block_backward, 0, system->gpu.main_stream>>>(
                 system->llm.logits,
                 system->llm.current_sequence,
+                system->llm.word_valid_mask,
                 system->llm.hidden_states,
                 system->llm.grad_output_weights,
                 system->llm.grad_hidden_states,
