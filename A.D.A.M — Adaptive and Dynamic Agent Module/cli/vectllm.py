@@ -410,12 +410,12 @@ def cmd_wikipedia(args):
             # Use API streaming
             print(f"   Mode: Wikipedia API (streaming)")
             print(f"   Language: {args.language}")
-            print(f"   RAM target: {args.ram_percent}%")
+            print(f"   Batch size: {args.batch_size} articles")
 
             trainer = WikipediaStreamTrainer(
                 brain,
                 language=args.language,
-                ram_percentage=args.ram_percent,
+                batch_size=args.batch_size,
                 stats_collector=stats,
                 checkpoint_manager=ckpt_manager
             )
@@ -546,8 +546,8 @@ def main():
                             help='Config preset')
     parser_wiki.add_argument('--language', type=str, default='en',
                             help='Wikipedia language code (default: en)')
-    parser_wiki.add_argument('--ram-percent', type=float, default=30.0,
-                            help='Target RAM usage percentage for article buffer (default: 30)')
+    parser_wiki.add_argument('--batch-size', type=int, default=100,
+                            help='Number of articles per batch (default: 100)')
 
     # SETTINGS/TUI command
     parser_settings = subparsers.add_parser('settings', help='Open A.D.A.M TUI (graphical interface)')
