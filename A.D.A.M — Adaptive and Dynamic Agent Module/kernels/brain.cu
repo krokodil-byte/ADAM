@@ -82,7 +82,11 @@ typedef struct {
     float* hidden_states;
     float* attention_output;
     float* logits;
-    
+
+    // Optimized computation buffers (for cuBLAS backward)
+    float* softmax_cache;     // [MAX_SEQ_LEN x TOTAL_VOCAB_SIZE] - cached softmax for backward
+    float* grad_softmax;      // [MAX_SEQ_LEN x TOTAL_VOCAB_SIZE] - gradient buffer
+
     // Semantic navigation
     float* semantic_state;
     float* cluster_activations;
@@ -1224,8 +1228,9 @@ void* background_self_training(void* arg) {
             );
             
             // Backward through embeddings (DUAL)
-            dim3 grid_emb_back(seq_len);
-            embedding_backward_kernel<<<grid_emb_back, EMBED_DIM, 0, system->gpu.main_stream>>>(
+            // OPTIMIZED: Use coalesced version for better memory access patterns
+            dim3 grid_emb_back(EMBED_DIM);  // One block per dimension
+            embedding_backward_coalesced_kernel<<<grid_emb_back, 256, 0, system->gpu.main_stream>>>(
                 system->llm.current_sequence,
                 system->llm.grad_hidden_states,
                 system->llm.grad_char_embeddings,
@@ -1443,7 +1448,11 @@ int init_system(void) {
     cudaMalloc(&g_system->llm.hidden_states, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
     cudaMalloc(&g_system->llm.attention_output, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
     cudaMalloc(&g_system->llm.logits, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
-    
+
+    // Allocate optimized computation buffers (for cuBLAS backward)
+    cudaMalloc(&g_system->llm.softmax_cache, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_softmax, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
+
     // Allocate semantic navigation buffers
     cudaMalloc(&g_system->llm.semantic_state, EMBED_DIM * sizeof(float));
     cudaMalloc(&g_system->llm.cluster_activations, VENN_CLUSTERS * sizeof(float));
@@ -1569,7 +1578,11 @@ void shutdown_system(void) {
     cudaFree(g_system->llm.hidden_states);
     cudaFree(g_system->llm.attention_output);
     cudaFree(g_system->llm.logits);
-    
+
+    // Free optimized computation buffers
+    cudaFree(g_system->llm.softmax_cache);
+    cudaFree(g_system->llm.grad_softmax);
+
     // Free semantic navigation
     cudaFree(g_system->llm.semantic_state);
     cudaFree(g_system->llm.cluster_activations);
@@ -2009,10 +2022,12 @@ int feed_training_batch(const int* tokens, int batch_size) {
         );
         
         // Backward: Embeddings (DUAL)
+        // OPTIMIZED: Use coalesced version for better memory access patterns
         cudaMemset(g_system->llm.grad_char_embeddings, 0, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
         cudaMemset(g_system->llm.grad_word_embeddings, 0, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-        
-        embedding_backward_kernel<<<grid_emb, block_emb>>>(
+
+        dim3 grid_emb_coalesced(EMBED_DIM);  // One block per dimension
+        embedding_backward_coalesced_kernel<<<grid_emb_coalesced, 256>>>(
             g_system->llm.current_sequence,
             g_system->llm.grad_hidden_states,
             g_system->llm.grad_char_embeddings,
