@@ -278,11 +278,12 @@ RUNTIME_CONFIG = RuntimeConfig()
 
 def set_config_from_preset(preset_name: str):
     """Imposta configurazione da preset"""
-    global MODEL_CONFIG, TRAINING_CONFIG
-    
+    global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG
+
     preset = get_config_preset(preset_name)
     MODEL_CONFIG = preset["model"]
     TRAINING_CONFIG = preset["training"]
+    PERFORMANCE_CONFIG = preset["performance"]
 
 
 def update_config(**kwargs):
