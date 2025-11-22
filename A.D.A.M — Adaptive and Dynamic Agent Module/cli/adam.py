@@ -28,7 +28,7 @@ try:
     from Utils.checkpoint import CheckpointManager
     from modules.training import MultiPassTrainer
     from modules.chat import InteractiveChat
-    from modules.dataset_training import DatasetLoader, DatasetTrainer
+    from modules.dataset_training import DatasetLoader, DatasetTrainer, HFDatasetLoader, HFDatasetTrainer
     from modules.wikipedia_training import WikipediaExtractor, WikipediaTrainer, WikipediaStreamTrainer
     from modules.tui import run_adam_tui
 except ImportError:
@@ -42,7 +42,7 @@ except ImportError:
     from ..Utils.checkpoint import CheckpointManager
     from ..modules.training import MultiPassTrainer
     from ..modules.chat import InteractiveChat
-    from ..modules.dataset_training import DatasetLoader, DatasetTrainer
+    from ..modules.dataset_training import DatasetLoader, DatasetTrainer, HFDatasetLoader, HFDatasetTrainer
     from ..modules.wikipedia_training import WikipediaExtractor, WikipediaTrainer, WikipediaStreamTrainer
     from ..modules.tui import run_adam_tui
 
@@ -343,51 +343,76 @@ def cmd_chat(args):
 def cmd_dataset(args):
     """Train on dataset"""
     print("📂 Dataset training")
-    
+
     dataset_path = Path(args.path)
     if not dataset_path.exists():
         print(f"❌ Dataset path not found: {dataset_path}")
         return 1
-    
+
     # Apply preset if specified
     if args.preset:
         set_config_from_preset(args.preset)
-    
-    # Create loader
-    loader = DatasetLoader(
-        str(dataset_path),
-        extensions=args.extensions.split(',') if args.extensions else None
-    )
-    
+
+    # Detect dataset type: HuggingFace (JSONL/Parquet/CSV) or plain text
+    is_hf_format = dataset_path.suffix.lower() in ['.jsonl', '.json', '.parquet', '.csv', '.tsv']
+
     # Create brain
     brain = VectLLMBrain()
     if args.checkpoint:
         print(f"   Loading checkpoint: {args.checkpoint}")
         brain.load_checkpoint(args.checkpoint)
-    
+
     brain.start()
-    
+
     try:
-        # Create trainer
         stats = StatsCollector()
         ckpt_manager = CheckpointManager()
-        trainer = DatasetTrainer(brain, loader, stats, ckpt_manager)
-        
-        # Train
-        trainer.train(
-            passes=args.passes,
-            auto_save_every=args.auto_save,
-            verbose=True
-        )
-        
+
+        if is_hf_format:
+            # HuggingFace style dataset
+            print(f"   Format: HuggingFace ({dataset_path.suffix})")
+
+            loader = HFDatasetLoader(
+                str(dataset_path),
+                input_column=args.input_col,
+                output_column=args.output_col,
+                text_column=args.text_col,
+                template=args.template,
+                max_samples=args.max_samples
+            )
+
+            trainer = HFDatasetTrainer(brain, loader, stats, ckpt_manager)
+
+            trainer.train(
+                passes=args.passes,
+                auto_save_every=args.auto_save or 1000,
+                verbose=True
+            )
+        else:
+            # Plain text directory/file
+            print(f"   Format: Plain text files")
+
+            loader = DatasetLoader(
+                str(dataset_path),
+                extensions=args.extensions.split(',') if args.extensions else None
+            )
+
+            trainer = DatasetTrainer(brain, loader, stats, ckpt_manager)
+
+            trainer.train(
+                passes=args.passes,
+                auto_save_every=args.auto_save,
+                verbose=True
+            )
+
         # Save final
         if args.output:
             print(f"\n💾 Saving final checkpoint: {args.output}")
             brain.save_checkpoint(args.output)
-    
+
     finally:
         brain.stop()
-    
+
     return 0
 
 
@@ -541,7 +566,7 @@ def main():
     
     # DATASET command
     parser_dataset = subparsers.add_parser('dataset', help='Train on dataset')
-    parser_dataset.add_argument('path', help='Dataset directory or file')
+    parser_dataset.add_argument('path', help='Dataset directory or file (supports .txt, .jsonl, .parquet, .csv)')
     parser_dataset.add_argument('-o', '--output', help='Output checkpoint')
     parser_dataset.add_argument('-c', '--checkpoint', help='Load from checkpoint')
     parser_dataset.add_argument('-p', '--passes', type=int, default=1,
@@ -549,9 +574,20 @@ def main():
     parser_dataset.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
                                help='Config preset')
     parser_dataset.add_argument('--auto-save', type=int, metavar='N',
-                               help='Auto-save every N files')
+                               help='Auto-save every N files/samples')
     parser_dataset.add_argument('--extensions', type=str,
-                               help='File extensions (comma-separated, e.g. .txt,.md)')
+                               help='File extensions for text files (comma-separated, e.g. .txt,.md)')
+    # HuggingFace dataset options
+    parser_dataset.add_argument('--input-col', type=str, dest='input_col',
+                               help='Input column name (auto-detect if not specified)')
+    parser_dataset.add_argument('--output-col', type=str, dest='output_col',
+                               help='Output column name (auto-detect if not specified)')
+    parser_dataset.add_argument('--text-col', type=str, dest='text_col',
+                               help='Text column for single-column datasets')
+    parser_dataset.add_argument('--template', type=str,
+                               help='Template for input/output pairs (default: "{input}\\n\\n{output}")')
+    parser_dataset.add_argument('--max-samples', type=int, dest='max_samples',
+                               help='Maximum number of samples to load')
     
     # WIKIPEDIA command
     parser_wiki = subparsers.add_parser('wikipedia', help='Train on Wikipedia (dump or API)')
