@@ -340,24 +340,22 @@ class VectLLMBrain:
             if result == 0:
                 char_embeddings[char_id] = np.array(emb_buffer)
         
-        # Attiva nuove parole
+        # Attiva SOLO le nuove parole (tra old_size e new_size)
         activated = 0
         for word, word_id in self.vocab.word_to_id.items():
-            if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
-                # Questa è una word (non char)
-                word_idx = word_id - MODEL_CONFIG.CHAR_VOCAB_SIZE
-                
+            # Solo parole nuove: word_id >= old_size e word_id < new_size
+            if word_id >= old_size and word_id < new_size:
                 # Calcola embedding iniziale (media dei char)
                 init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
-                
+
                 # Converti a ctypes array
                 emb_array = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)(*init_emb)
-                
+
                 # Attiva nel kernel
                 result = self.lib.activate_word_token(word_id, emb_array)
                 if result == 0:
                     activated += 1
-        
+
         if activated > 0:
             print(f"   🔄 Synced {activated} new words to GPU")
     
