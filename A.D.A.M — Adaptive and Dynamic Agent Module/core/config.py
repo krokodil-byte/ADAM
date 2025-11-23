@@ -11,27 +11,53 @@ from pathlib import Path
 @dataclass
 class ModelConfig:
     """Configurazione architettura del modello"""
-    
+
     # Dimensioni modello
     EMBED_DIM: int = 768
     NUM_HEADS: int = 12
     NUM_LAYERS: int = 6
     MAX_SEQ_LEN: int = 512
-    
+
     # Vocabolario dinamico
     CHAR_VOCAB_SIZE: int = 256  # ASCII/UTF-8 base
     MAX_WORD_VOCAB_SIZE: int = 100000  # Massimo numero di word tokens
     WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze
     WORD_PRUNING_THRESHOLD: int = 2  # Rimuovi word se freq < N
     MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char
-    
+
     # Venn Semantic System
     VENN_CLUSTERS: int = 256
     INTERSECTION_THRESHOLD: float = 0.5  # Threshold per connessioni cluster
     CLUSTER_UPDATE_LR: float = 0.1  # Learning rate per aggiornamento centri cluster
-    
+
     # Episodic Memory
     EPISODIC_BUFFER_SIZE: int = 1024
+
+
+@dataclass
+class VocabOptimizationConfig:
+    """Configurazione ottimizzazione vocabolario CPU/GPU hybrid"""
+
+    # Feature flag
+    ENABLE_VOCAB_OPTIMIZATION: bool = True  # Master switch for all optimizations
+
+    # Hot/Cold vocab architecture
+    MAX_HOT_VOCAB: int = 10000  # GPU: massimo hot embeddings in VRAM
+    HOT_SELECTION_THRESHOLD: int = 50  # freq minima per essere hot
+    HOT_REFRESH_INTERVAL: int = 100  # batch tra refresh hot vocab
+    RECENCY_DECAY_FACTOR: float = 0.95  # per calcolo recency score
+
+    # Batch sync settings
+    BATCH_SYNC_SIZE: int = 100  # Sync words to GPU in batches of N
+    LAZY_SYNC_THRESHOLD: int = 10  # Sync immediately if pending > N
+
+    # Caching
+    CACHE_CHAR_EMBEDDINGS: bool = True  # Cache char embeddings from GPU
+    CHAR_EMBEDDING_CACHE_TTL: int = 1000  # Refresh cache every N syncs
+
+    # Performance tuning
+    PREALLOCATE_HOT_BUFFER: bool = True  # Pre-allocate GPU buffer for hot vocab
+    USE_NUMPY_BATCH_OPS: bool = True  # Use numpy for batch embedding computation
 
 
 @dataclass
@@ -164,6 +190,7 @@ def get_config_preset(preset_name: str = "default"):
             "training": TrainingConfig(),
             "model": ModelConfig(),
             "performance": PerformanceConfig(),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         "fast_learning": {
@@ -175,6 +202,11 @@ def get_config_preset(preset_name: str = "default"):
             ),
             "model": ModelConfig(),
             "performance": PerformanceConfig(),
+            "vocab_optimization": VocabOptimizationConfig(
+                MAX_HOT_VOCAB=5000,  # Smaller hot vocab for faster refresh
+                HOT_REFRESH_INTERVAL=50,  # More frequent refresh
+                LAZY_SYNC_THRESHOLD=5,  # Sync sooner
+            ),
         },
 
         "stable": {
@@ -186,6 +218,9 @@ def get_config_preset(preset_name: str = "default"):
             ),
             "model": ModelConfig(),
             "performance": PerformanceConfig(),
+            "vocab_optimization": VocabOptimizationConfig(
+                ENABLE_VOCAB_OPTIMIZATION=False,  # No dynamic expansion in stable
+            ),
         },
 
         "inference": {
@@ -199,6 +234,9 @@ def get_config_preset(preset_name: str = "default"):
                 USE_FUSED_KERNELS=True,
                 PIPELINE_MODE="disabled",  # No training pipeline needed
             ),
+            "vocab_optimization": VocabOptimizationConfig(
+                ENABLE_VOCAB_OPTIMIZATION=False,  # No expansion during inference
+            ),
         },
 
         "research": {
@@ -210,9 +248,13 @@ def get_config_preset(preset_name: str = "default"):
             ),
             "model": ModelConfig(),
             "performance": PerformanceConfig(),
+            "vocab_optimization": VocabOptimizationConfig(
+                MAX_HOT_VOCAB=15000,  # More words for research
+                HOT_REFRESH_INTERVAL=25,  # Frequent refresh for experimentation
+            ),
         },
 
-        # NEW: High performance preset
+        # High performance preset
         "high_performance": {
             "training": TrainingConfig(
                 BASE_LR=0.0001,
@@ -230,9 +272,14 @@ def get_config_preset(preset_name: str = "default"):
                 USE_WARP_PRIMITIVES=True,
                 GPU_UTILIZATION_TARGET=90,
             ),
+            "vocab_optimization": VocabOptimizationConfig(
+                MAX_HOT_VOCAB=20000,  # Larger hot vocab for performance
+                BATCH_SYNC_SIZE=200,  # Larger batches
+                LAZY_SYNC_THRESHOLD=20,  # Allow more pending before sync
+            ),
         },
 
-        # NEW: Memory efficient preset
+        # Memory efficient preset
         "memory_efficient": {
             "training": TrainingConfig(
                 BASE_LR=0.0001,
@@ -246,9 +293,13 @@ def get_config_preset(preset_name: str = "default"):
                 USE_PINNED_MEMORY=False,
                 PREALLOCATE_BUFFERS=False,
             ),
+            "vocab_optimization": VocabOptimizationConfig(
+                MAX_HOT_VOCAB=5000,  # Smaller hot vocab to save VRAM
+                PREALLOCATE_HOT_BUFFER=False,  # Don't pre-allocate
+            ),
         },
 
-        # NEW: Maximum throughput
+        # Maximum throughput
         "max_throughput": {
             "training": TrainingConfig(
                 BASE_LR=0.0001,
@@ -267,6 +318,11 @@ def get_config_preset(preset_name: str = "default"):
                 USE_WARP_PRIMITIVES=True,
                 GPU_UTILIZATION_TARGET=95,
             ),
+            "vocab_optimization": VocabOptimizationConfig(
+                MAX_HOT_VOCAB=25000,  # Maximum hot vocab
+                BATCH_SYNC_SIZE=500,  # Large batches
+                HOT_REFRESH_INTERVAL=200,  # Less frequent refresh
+            ),
         },
     }
 
@@ -280,16 +336,19 @@ PERFORMANCE_CONFIG = PerformanceConfig()
 GENERATION_CONFIG = GenerationConfig()
 CHECKPOINT_CONFIG = CheckpointConfig()
 RUNTIME_CONFIG = RuntimeConfig()
+VOCAB_OPTIMIZATION_CONFIG = VocabOptimizationConfig()
 
 
 def set_config_from_preset(preset_name: str):
     """Imposta configurazione da preset"""
-    global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG
+    global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG, VOCAB_OPTIMIZATION_CONFIG
 
     preset = get_config_preset(preset_name)
     MODEL_CONFIG = preset["model"]
     TRAINING_CONFIG = preset["training"]
     PERFORMANCE_CONFIG = preset["performance"]
+    if "vocab_optimization" in preset:
+        VOCAB_OPTIMIZATION_CONFIG = preset["vocab_optimization"]
 
 
 def update_config(**kwargs):

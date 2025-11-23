@@ -14,9 +14,10 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG, PERFORMANCE_CONFIG
+from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG, PERFORMANCE_CONFIG, VOCAB_OPTIMIZATION_CONFIG
 from .vocabulary import DynamicVocabulary
 from .pipeline import AsyncBatchLoader, PipelinedTrainer, BatchData
+import time
 
 
 class CUDACompiler:
@@ -169,7 +170,15 @@ class VectLLMBrain:
         self._token_buffer_size = 0
         if hasattr(PERFORMANCE_CONFIG, 'PREALLOCATE_BUFFERS') and PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS:
             self._preallocate_training_buffers()
-        
+
+        # Vocab optimization: caching and batching
+        self._char_embeddings_cache = None  # Cached char embeddings from GPU
+        self._char_cache_sync_count = 0  # Counter for cache invalidation
+        self._pending_words = []  # Words waiting to be synced to GPU
+        self._last_sync_time = 0  # For performance monitoring
+        self._total_sync_time = 0  # Accumulated sync time
+        self._sync_count = 0  # Number of syncs performed
+
     def _setup_api(self):
         """Setup function signatures per ctypes"""
         # init_system
@@ -341,34 +350,115 @@ class VectLLMBrain:
         """Decode tokens a text"""
         return self.vocab.decode(tokens)
     
+    def _get_char_embeddings_cached(self) -> np.ndarray:
+        """
+        Get char embeddings from GPU with caching.
+        OPTIMIZATION: Avoid 256 individual GPU calls on every sync.
+        """
+        # Check if cache is valid
+        cache_ttl = VOCAB_OPTIMIZATION_CONFIG.CHAR_EMBEDDING_CACHE_TTL
+        if (VOCAB_OPTIMIZATION_CONFIG.CACHE_CHAR_EMBEDDINGS and
+            self._char_embeddings_cache is not None and
+            self._char_cache_sync_count < cache_ttl):
+            self._char_cache_sync_count += 1
+            return self._char_embeddings_cache
+
+        # Fetch all char embeddings from GPU
+        char_embeddings = np.zeros((MODEL_CONFIG.CHAR_VOCAB_SIZE, MODEL_CONFIG.EMBED_DIM), dtype=np.float32)
+
+        # Use batch fetch if available, otherwise individual calls
+        for char_id in range(MODEL_CONFIG.CHAR_VOCAB_SIZE):
+            emb_buffer = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)()
+            result = self.lib.get_word_embedding(char_id, emb_buffer)
+            if result == 0:
+                char_embeddings[char_id] = np.array(emb_buffer)
+
+        # Cache the result
+        if VOCAB_OPTIMIZATION_CONFIG.CACHE_CHAR_EMBEDDINGS:
+            self._char_embeddings_cache = char_embeddings
+            self._char_cache_sync_count = 0
+
+        return char_embeddings
+
     def _sync_new_words(self, old_size: int, new_size: int):
         """
         Sincronizza nuove parole con il kernel CUDA.
-        Attiva word embeddings per parole appena create.
+        OPTIMIZED: Uses caching, direct word lookup, and batch operations.
         """
         if not self.initialized:
             return
-        
-        # Get char embeddings from kernel (per calcolare init embeddings)
+
+        if not VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION:
+            # Fallback to original behavior
+            self._sync_new_words_legacy(old_size, new_size)
+            return
+
+        start_time = time.time()
+        num_new_words = new_size - old_size
+
+        # Collect new words directly from id_to_word (O(1) per word, not O(n) scan)
+        new_words = []
+        for word_id in range(old_size, new_size):
+            if word_id in self.vocab.id_to_word:
+                word = self.vocab.id_to_word[word_id]
+                new_words.append((word_id, word))
+
+        if not new_words:
+            return
+
+        # Get cached char embeddings (avoids 256 GPU calls)
+        char_embeddings = self._get_char_embeddings_cached()
+
+        # Batch compute embeddings using numpy
+        if VOCAB_OPTIMIZATION_CONFIG.USE_NUMPY_BATCH_OPS:
+            # Prepare batch data
+            word_ids = []
+            init_embeddings = []
+
+            for word_id, word in new_words:
+                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+                word_ids.append(word_id)
+                init_embeddings.append(init_emb)
+
+            # Convert to numpy array for potential batch operations
+            init_embeddings = np.array(init_embeddings, dtype=np.float32)
+        else:
+            word_ids = [w[0] for w in new_words]
+            init_embeddings = [self.vocab.get_word_embedding_init(w[1], char_embeddings) for w in new_words]
+
+        # Sync to GPU (still individual calls, but with pre-computed embeddings)
+        activated = 0
+        for i, word_id in enumerate(word_ids):
+            emb = init_embeddings[i] if isinstance(init_embeddings, np.ndarray) else init_embeddings[i]
+            emb_array = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)(*emb)
+            result = self.lib.activate_word_token(word_id, emb_array)
+            if result == 0:
+                activated += 1
+
+        # Track performance
+        elapsed = time.time() - start_time
+        self._total_sync_time += elapsed
+        self._sync_count += 1
+        self._last_sync_time = elapsed
+
+        if activated > 0:
+            avg_time = self._total_sync_time / self._sync_count if self._sync_count > 0 else elapsed
+            print(f"   🔄 Synced {activated} words in {elapsed*1000:.1f}ms (avg: {avg_time*1000:.1f}ms)")
+
+    def _sync_new_words_legacy(self, old_size: int, new_size: int):
+        """Legacy sync method for fallback."""
         char_embeddings = np.zeros((MODEL_CONFIG.CHAR_VOCAB_SIZE, MODEL_CONFIG.EMBED_DIM), dtype=np.float32)
         for char_id in range(MODEL_CONFIG.CHAR_VOCAB_SIZE):
             emb_buffer = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)()
             result = self.lib.get_word_embedding(char_id, emb_buffer)
             if result == 0:
                 char_embeddings[char_id] = np.array(emb_buffer)
-        
-        # Attiva SOLO le nuove parole (tra old_size e new_size)
+
         activated = 0
         for word, word_id in self.vocab.word_to_id.items():
-            # Solo parole nuove: word_id >= old_size e word_id < new_size
             if word_id >= old_size and word_id < new_size:
-                # Calcola embedding iniziale (media dei char)
                 init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
-
-                # Converti a ctypes array
                 emb_array = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)(*init_emb)
-
-                # Attiva nel kernel
                 result = self.lib.activate_word_token(word_id, emb_array)
                 if result == 0:
                     activated += 1
