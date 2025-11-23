@@ -233,11 +233,15 @@ class ADAMTUI:
                 with open(self.SETTINGS_FILE, 'r') as f:
                     saved = json.load(f)
                     # Update only existing keys
+                    loaded_count = 0
                     for key, value in saved.items():
                         if key in self.values:
                             self.values[key] = value
-        except Exception:
-            pass  # Use defaults if load fails
+                            loaded_count += 1
+                    if loaded_count > 0:
+                        print(f"✓ Loaded {loaded_count} settings from {self.SETTINGS_FILE}")
+        except Exception as e:
+            print(f"⚠ Could not load settings: {e}")
 
     def _save_settings_to_file(self, silent=False):
         """Save settings to file"""
