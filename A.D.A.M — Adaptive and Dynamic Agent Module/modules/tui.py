@@ -239,21 +239,27 @@ class ADAMTUI:
         except Exception:
             pass  # Use defaults if load fails
 
-    def _save_settings_to_file(self):
+    def _save_settings_to_file(self, silent=False):
         """Save settings to file"""
         try:
             self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(self.SETTINGS_FILE, 'w') as f:
                 json.dump(self.values, f, indent=2)
+            if not silent:
+                print(f"✓ Settings saved to {self.SETTINGS_FILE}")
             return True
         except Exception as e:
+            if not silent:
+                print(f"✗ Failed to save settings: {e}")
             return False
 
     def run(self):
         """Start TUI"""
-        curses.wrapper(self._main_loop)
-        # Save settings on exit
-        self._save_settings_to_file()
+        try:
+            curses.wrapper(self._main_loop)
+        finally:
+            # Always save settings on exit
+            self._save_settings_to_file()
 
     def _main_loop(self, stdscr):
         """Main curses loop"""
@@ -744,8 +750,8 @@ class ADAMTUI:
             with open(config_path, 'w') as f:
                 json.dump(self.settings, f, indent=2)
             # Also save TUI values
-            if self._save_settings_to_file():
-                self.message = f"✓ Saved settings"
+            if self._save_settings_to_file(silent=True):
+                self.message = f"✓ Saved settings to ~/.adam/"
                 self.message_type = "success"
             else:
                 self.message = f"✓ Config saved, TUI values failed"
