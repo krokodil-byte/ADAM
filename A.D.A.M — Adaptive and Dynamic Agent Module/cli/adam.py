@@ -381,12 +381,17 @@ def cmd_dataset(args):
                 max_samples=args.max_samples
             )
 
-            trainer = HFDatasetTrainer(brain, loader, stats, ckpt_manager)
+            trainer = HFDatasetTrainer(
+                brain, loader, stats, ckpt_manager,
+                validation_split=args.val_split
+            )
 
             trainer.train(
                 passes=args.passes,
                 auto_save_every=args.auto_save or 1000,
-                verbose=True
+                verbose=True,
+                enable_validation=args.validation,
+                enable_early_stopping=args.early_stopping
             )
         else:
             # Plain text directory/file
@@ -397,12 +402,17 @@ def cmd_dataset(args):
                 extensions=args.extensions.split(',') if args.extensions else None
             )
 
-            trainer = DatasetTrainer(brain, loader, stats, ckpt_manager)
+            trainer = DatasetTrainer(
+                brain, loader, stats, ckpt_manager,
+                validation_split=args.val_split
+            )
 
             trainer.train(
                 passes=args.passes,
                 auto_save_every=args.auto_save,
-                verbose=True
+                verbose=True,
+                enable_validation=args.validation,
+                enable_early_stopping=args.early_stopping
             )
 
         # Save final
@@ -459,14 +469,17 @@ def cmd_wikipedia(args):
                 language=args.language,
                 batch_size=args.batch_size,
                 stats_collector=stats,
-                checkpoint_manager=ckpt_manager
+                checkpoint_manager=ckpt_manager,
+                validation_articles=args.val_articles
             )
 
             trainer.train(
                 max_articles=args.max_articles,
                 passes_per_batch=args.passes,
                 auto_save_every=args.auto_save or 100,
-                verbose=True
+                verbose=True,
+                enable_validation=args.validation,
+                enable_early_stopping=args.early_stopping
             )
         else:
             # Use dump file
@@ -540,6 +553,10 @@ def main():
                              help='Auto-save checkpoint every N passes')
     parser_train.add_argument('--prune-vocab', action='store_true',
                              help='Prune vocabulary after training')
+    parser_train.add_argument('--validation', action='store_true',
+                             help='Enable validation during training')
+    parser_train.add_argument('--early-stopping', action='store_true',
+                             help='Stop when validation stops improving')
     
     # GENERATE command
     parser_gen = subparsers.add_parser('generate', help='Generate text')
@@ -588,6 +605,13 @@ def main():
                                help='Template for input/output pairs (default: "{input}\\n\\n{output}")')
     parser_dataset.add_argument('--max-samples', type=int, dest='max_samples',
                                help='Maximum number of samples to load')
+    # Validation options
+    parser_dataset.add_argument('--validation', action='store_true',
+                               help='Enable validation during training')
+    parser_dataset.add_argument('--early-stopping', action='store_true',
+                               help='Stop when validation stops improving')
+    parser_dataset.add_argument('--val-split', type=float, dest='val_split', default=0.1,
+                               help='Validation split fraction (default: 0.1)')
     
     # WIKIPEDIA command
     parser_wiki = subparsers.add_parser('wikipedia', help='Train on Wikipedia (dump or API)')
@@ -607,6 +631,13 @@ def main():
                             help='Wikipedia language code (default: en)')
     parser_wiki.add_argument('--batch-size', type=int, default=100,
                             help='Number of articles per batch (default: 100)')
+    # Validation options
+    parser_wiki.add_argument('--validation', action='store_true',
+                            help='Enable validation during training')
+    parser_wiki.add_argument('--early-stopping', action='store_true',
+                            help='Stop when validation stops improving')
+    parser_wiki.add_argument('--val-articles', type=int, dest='val_articles', default=10,
+                            help='Number of articles for validation (default: 10)')
 
     # DASHBOARD/TUI command (alias for running without args)
     parser_dashboard = subparsers.add_parser('dashboard', help='Open A.D.A.M TUI dashboard')
