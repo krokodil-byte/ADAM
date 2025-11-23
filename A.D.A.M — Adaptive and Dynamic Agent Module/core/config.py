@@ -107,6 +107,10 @@ class PerformanceConfig:
     PIPELINE_MODE: str = "double"  # "disabled", "double", "triple"
     ASYNC_TRANSFERS: bool = True  # Async H2D/D2H transfers
 
+    # CPU worker settings
+    NUM_CPU_WORKERS: int = 1  # Number of CPU workers for preprocessing (1 = single thread)
+    PREFETCH_SIZE: int = 3  # Number of batches to prefetch
+
     # Stream configuration
     NUM_COMPUTE_STREAMS: int = 1  # Number of compute streams
     OVERLAP_H2D_COMPUTE: bool = True  # Overlap transfers with compute

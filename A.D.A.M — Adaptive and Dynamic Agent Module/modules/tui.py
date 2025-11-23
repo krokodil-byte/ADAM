@@ -55,6 +55,14 @@ class ADAMTUI:
             'early_stopping': True,
             # Vocab optimization settings
             'vocab_opt_enabled': True,
+            # Hot/Cold vocab settings
+            'enable_hot_cold': False,
+            'max_hot_vocab': 10000,
+            'hot_usage_threshold': 5,
+            'hot_refresh_interval': 1000,
+            'lru_eviction': True,
+            'amd_infinity_cache': False,
+            'use_pinned_memory': True,
         }
 
         # Settings data - must be initialized BEFORE _load_settings
@@ -141,6 +149,13 @@ class ADAMTUI:
                 'title': 'Vocab Optimization Settings',
                 'items': [
                     ('enabled', '✓ Enable Optimization', 'Enable vocab optimization (caching, batching)'),
+                    ('hot_cold', '🔥❄️  Hot/Cold Vocab', 'Enable hot/cold vocabulary architecture'),
+                    ('max_hot', '📊 Max Hot Vocab', 'Maximum words in GPU (hot vocab)'),
+                    ('usage_threshold', '📈 Usage Threshold', 'Min uses to stay in hot vocab'),
+                    ('refresh_interval', '🔄 Refresh Interval', 'Check hot/cold every N words'),
+                    ('lru', '📋 LRU Eviction', 'Use LRU eviction (vs frequency-based)'),
+                    ('pinned_mem', '📌 Pinned Memory', 'Use pinned memory for faster transfers'),
+                    ('amd_infinity', '🔴 AMD Infinity Cache', 'Enable AMD SAM/Infinity Cache path'),
                     ('back', '← Back', 'Return to settings'),
                 ]
             },
@@ -170,6 +185,8 @@ class ADAMTUI:
                     ('warp', '🔄 Warp Primitives', 'Use warp-level shuffle operations'),
                     ('target', '🎯 GPU Target', 'Target GPU utilization %'),
                     ('preallocate', '📦 Preallocate', 'Preallocate buffers at init'),
+                    ('cpu_workers', '👷 CPU Workers', 'Number of CPU workers for preprocessing'),
+                    ('prefetch', '📥 Prefetch Size', 'Number of batches to prefetch'),
                     ('back', '← Back', 'Return to settings'),
                 ]
             },
@@ -205,6 +222,8 @@ class ADAMTUI:
                 'warp': PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES,
                 'target': PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET,
                 'preallocate': PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS,
+                'cpu_workers': PERFORMANCE_CONFIG.NUM_CPU_WORKERS,
+                'prefetch': PERFORMANCE_CONFIG.PREFETCH_SIZE,
             },
             'generation': {
                 'temperature': GENERATION_CONFIG.TEMPERATURE,
@@ -419,6 +438,20 @@ class ADAMTUI:
         # Vocab optimization values
         elif key == 'enabled':
             return "enabled" if self.values['vocab_opt_enabled'] else "disabled"
+        elif key == 'hot_cold':
+            return "enabled" if self.values['enable_hot_cold'] else "disabled"
+        elif key == 'max_hot':
+            return str(self.values['max_hot_vocab'])
+        elif key == 'usage_threshold':
+            return str(self.values['hot_usage_threshold'])
+        elif key == 'refresh_interval':
+            return str(self.values['hot_refresh_interval'])
+        elif key == 'lru':
+            return "LRU" if self.values['lru_eviction'] else "Frequency"
+        elif key == 'pinned_mem':
+            return "enabled" if self.values['use_pinned_memory'] else "disabled"
+        elif key == 'amd_infinity':
+            return "enabled" if self.values['amd_infinity_cache'] else "disabled"
         return ""
 
     def _handle_selection(self, stdscr, key: str):
@@ -567,6 +600,47 @@ class ADAMTUI:
             idx = self._select_dialog(stdscr, "Vocab Optimization", options)
             if idx >= 0:
                 self.values['vocab_opt_enabled'] = (idx == 0)
+        elif key == 'hot_cold':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "Hot/Cold Vocab", options)
+            if idx >= 0:
+                self.values['enable_hot_cold'] = (idx == 0)
+        elif key == 'max_hot':
+            val = self._input_dialog(stdscr, "Max Hot Vocab", str(self.values['max_hot_vocab']))
+            if val:
+                try:
+                    self.values['max_hot_vocab'] = int(val)
+                except ValueError:
+                    pass
+        elif key == 'usage_threshold':
+            val = self._input_dialog(stdscr, "Usage Threshold", str(self.values['hot_usage_threshold']))
+            if val:
+                try:
+                    self.values['hot_usage_threshold'] = int(val)
+                except ValueError:
+                    pass
+        elif key == 'refresh_interval':
+            val = self._input_dialog(stdscr, "Refresh Interval", str(self.values['hot_refresh_interval']))
+            if val:
+                try:
+                    self.values['hot_refresh_interval'] = int(val)
+                except ValueError:
+                    pass
+        elif key == 'lru':
+            options = ['LRU', 'Frequency']
+            idx = self._select_dialog(stdscr, "Eviction Strategy", options)
+            if idx >= 0:
+                self.values['lru_eviction'] = (idx == 0)
+        elif key == 'pinned_mem':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "Pinned Memory", options)
+            if idx >= 0:
+                self.values['use_pinned_memory'] = (idx == 0)
+        elif key == 'amd_infinity':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "AMD Infinity Cache", options)
+            if idx >= 0:
+                self.values['amd_infinity_cache'] = (idx == 0)
 
         # Run commands
         elif key == 'run':
@@ -736,6 +810,8 @@ class ADAMTUI:
         PERFORMANCE_CONFIG.USE_PINNED_MEMORY = perf['pinned']
         PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES = perf['warp']
         PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET = perf['target']
+        PERFORMANCE_CONFIG.NUM_CPU_WORKERS = perf.get('cpu_workers', 1)
+        PERFORMANCE_CONFIG.PREFETCH_SIZE = perf.get('prefetch', 3)
         PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS = perf['preallocate']
 
     def _save_settings(self):
