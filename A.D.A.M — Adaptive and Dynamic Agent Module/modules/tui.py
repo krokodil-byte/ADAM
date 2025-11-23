@@ -14,23 +14,27 @@ from typing import Any, Dict, List, Optional
 try:
     from core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG,
-        PERFORMANCE_CONFIG, GENERATION_CONFIG
+        PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG
     )
 except ImportError:
     from ..core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG,
-        PERFORMANCE_CONFIG, GENERATION_CONFIG
+        PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG
     )
 
 
 class ADAMTUI:
     """TUI completa per A.D.A.M"""
 
+    # Settings file path
+    SETTINGS_FILE = Path.home() / ".adam" / "tui_settings.json"
+
     def __init__(self):
         self.current_menu = 'main'
         self.selected_item = 0
         self.message = ""
         self.message_type = "info"
+        self.should_exit = False
 
         # Stored values for operations
         self.values = {
@@ -49,7 +53,14 @@ class ADAMTUI:
             'validation_split': 0.1,
             'validation_articles': 10,
             'early_stopping': True,
+            # Vocab optimization settings
+            'vocab_opt_enabled': True,
+            'max_hot_vocab': 10000,
+            'batch_sync_size': 100,
         }
+
+        # Load saved settings
+        self._load_settings()
 
         # Menu definitions
         self.menus = {
@@ -120,9 +131,19 @@ class ADAMTUI:
                     ('training', '📈 Training Parameters', 'Learning rate, momentum'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU optimizations, pipeline, kernels'),
+                    ('vocab_opt', '🔤 Vocab Optimization', 'CPU/GPU hybrid vocab settings'),
                     ('system', '🖥️  System', 'CUDA, checkpoints'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'vocab_opt': {
+                'title': 'Vocab Optimization Settings',
+                'items': [
+                    ('enabled', '✓ Enable Optimization', 'Enable vocab optimization pipeline'),
+                    ('max_hot', '🔥 Max Hot Vocab', 'Maximum hot embeddings in GPU'),
+                    ('batch_sync', '📦 Batch Sync Size', 'Words per GPU sync batch'),
+                    ('back', '← Back', 'Return to settings'),
                 ]
             },
             'generation': {
@@ -205,9 +226,34 @@ class ADAMTUI:
             }
         }
 
+    def _load_settings(self):
+        """Load settings from file"""
+        try:
+            if self.SETTINGS_FILE.exists():
+                with open(self.SETTINGS_FILE, 'r') as f:
+                    saved = json.load(f)
+                    # Update only existing keys
+                    for key, value in saved.items():
+                        if key in self.values:
+                            self.values[key] = value
+        except Exception:
+            pass  # Use defaults if load fails
+
+    def _save_settings_to_file(self):
+        """Save settings to file"""
+        try:
+            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.SETTINGS_FILE, 'w') as f:
+                json.dump(self.values, f, indent=2)
+            return True
+        except Exception as e:
+            return False
+
     def run(self):
         """Start TUI"""
         curses.wrapper(self._main_loop)
+        # Save settings on exit
+        self._save_settings_to_file()
 
     def _main_loop(self, stdscr):
         """Main curses loop"""
@@ -222,7 +268,7 @@ class ADAMTUI:
         curses.init_pair(4, curses.COLOR_RED, -1)
         curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)
 
-        while True:
+        while not self.should_exit:
             stdscr.clear()
             height, width = stdscr.getmaxyx()
             menu = self.menus[self.current_menu]
@@ -286,7 +332,7 @@ class ADAMTUI:
 
             if key == ord('q') or key == ord('Q'):
                 if self.current_menu == 'main':
-                    break
+                    self.should_exit = True
                 else:
                     self.current_menu = 'main'
                     self.selected_item = 0
@@ -345,20 +391,28 @@ class ADAMTUI:
             return str(self.values['validation_articles'])
         elif key == 'val_split':
             return f"{self.values['validation_split']:.0%}"
+        # Vocab optimization values
+        elif key == 'enabled':
+            return "enabled" if self.values['vocab_opt_enabled'] else "disabled"
+        elif key == 'max_hot':
+            return str(self.values['max_hot_vocab'])
+        elif key == 'batch_sync':
+            return str(self.values['batch_sync_size'])
         return ""
 
     def _handle_selection(self, stdscr, key: str):
         """Handle menu item selection"""
         # Navigation
         if key == 'back':
-            if self.current_menu in ['generation', 'performance']:
+            if self.current_menu in ['generation', 'performance', 'vocab_opt']:
                 self.current_menu = 'settings'
             else:
                 self.current_menu = 'main'
             self.selected_item = 0
             return
         elif key == 'quit':
-            return  # Will exit loop
+            self.should_exit = True
+            return
 
         # Settings categories - handle BEFORE menu navigation
         # so we call _edit_settings instead of navigating to their menus
@@ -376,6 +430,10 @@ class ADAMTUI:
             return
         elif key == 'system':
             self._edit_settings(stdscr, 'system')
+            return
+        elif key == 'vocab_opt':
+            self.current_menu = 'vocab_opt'
+            self.selected_item = 0
             return
         elif key == 'save':
             self._save_settings()
@@ -481,6 +539,29 @@ class ADAMTUI:
             if value is not None:
                 try:
                     self.values['validation_split'] = float(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+
+        # Vocab optimization inputs
+        elif key == 'enabled':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "Vocab Optimization", options)
+            if idx >= 0:
+                self.values['vocab_opt_enabled'] = (idx == 0)
+        elif key == 'max_hot':
+            value = self._input_dialog(stdscr, "Max Hot Vocab", str(self.values['max_hot_vocab']))
+            if value is not None:
+                try:
+                    self.values['max_hot_vocab'] = int(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+        elif key == 'batch_sync':
+            value = self._input_dialog(stdscr, "Batch Sync Size", str(self.values['batch_sync_size']))
+            if value is not None:
+                try:
+                    self.values['batch_sync_size'] = int(value)
                 except ValueError:
                     self.message = "Invalid number"
                     self.message_type = "error"
@@ -662,8 +743,13 @@ class ADAMTUI:
         try:
             with open(config_path, 'w') as f:
                 json.dump(self.settings, f, indent=2)
-            self.message = f"✓ Saved to {config_path}"
-            self.message_type = "success"
+            # Also save TUI values
+            if self._save_settings_to_file():
+                self.message = f"✓ Saved settings"
+                self.message_type = "success"
+            else:
+                self.message = f"✓ Config saved, TUI values failed"
+                self.message_type = "success"
         except Exception as e:
             self.message = f"✗ Save failed: {e}"
             self.message_type = "error"
@@ -707,6 +793,13 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        # Vocab optimization
+        if not self.values['vocab_opt_enabled']:
+            cmd += " --no-vocab-opt"
+        if self.values['max_hot_vocab'] != 10000:
+            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
+        if self.values['batch_sync_size'] != 100:
+            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -736,6 +829,13 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        # Vocab optimization
+        if not self.values['vocab_opt_enabled']:
+            cmd += " --no-vocab-opt"
+        if self.values['max_hot_vocab'] != 10000:
+            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
+        if self.values['batch_sync_size'] != 100:
+            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -768,6 +868,13 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        # Vocab optimization
+        if not self.values['vocab_opt_enabled']:
+            cmd += " --no-vocab-opt"
+        if self.values['max_hot_vocab'] != 10000:
+            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
+        if self.values['batch_sync_size'] != 100:
+            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
