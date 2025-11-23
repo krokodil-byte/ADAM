@@ -516,6 +516,9 @@ class WikipediaStreamTrainer:
         if not self.val_articles:
             return -1.0
 
+        # Defer GPU syncs during validation to avoid contention
+        self.brain.begin_validation()
+
         total_loss = 0.0
         count = 0
 
@@ -524,6 +527,9 @@ class WikipediaStreamTrainer:
             if loss >= 0:
                 total_loss += loss
                 count += 1
+
+        # Resume normal sync after validation
+        self.brain.end_validation()
 
         if count == 0:
             return -1.0

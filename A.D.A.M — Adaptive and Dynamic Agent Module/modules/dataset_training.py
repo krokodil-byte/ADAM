@@ -450,6 +450,9 @@ class HFDatasetTrainer:
         if not self.val_samples:
             return -1.0
 
+        # Defer GPU syncs during validation to avoid contention
+        self.brain.begin_validation()
+
         total_loss = 0.0
         count = 0
 
@@ -458,6 +461,9 @@ class HFDatasetTrainer:
             if loss >= 0:
                 total_loss += loss
                 count += 1
+
+        # Resume normal sync after validation
+        self.brain.end_validation()
 
         if count == 0:
             return -1.0
@@ -805,6 +811,9 @@ class DatasetTrainer:
         if not self.val_files:
             return -1.0
 
+        # Defer GPU syncs during validation to avoid contention
+        self.brain.begin_validation()
+
         total_loss = 0.0
         count = 0
 
@@ -815,6 +824,9 @@ class DatasetTrainer:
                 if loss >= 0:
                     total_loss += loss
                     count += 1
+
+        # Resume normal sync after validation
+        self.brain.end_validation()
 
         if count == 0:
             return -1.0
