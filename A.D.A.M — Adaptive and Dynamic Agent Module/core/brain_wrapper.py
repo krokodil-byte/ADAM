@@ -242,7 +242,15 @@ class VectLLMBrain:
             ctypes.POINTER(ctypes.c_float)
         ]
         self.lib.activate_word_token.restype = ctypes.c_int
-        
+
+        # activate_word_tokens_batch (BATCH SYNC)
+        self.lib.activate_word_tokens_batch.argtypes = [
+            ctypes.POINTER(ctypes.c_int),   # word_ids array
+            ctypes.POINTER(ctypes.c_float), # embeddings array
+            ctypes.c_int                     # num_words
+        ]
+        self.lib.activate_word_tokens_batch.restype = ctypes.c_int
+
         # deactivate_word_token
         self.lib.deactivate_word_token.argtypes = [ctypes.c_int]
         self.lib.deactivate_word_token.restype = ctypes.c_int
@@ -409,31 +417,29 @@ class VectLLMBrain:
         # Get cached char embeddings (avoids 256 GPU calls)
         char_embeddings = self._get_char_embeddings_cached()
 
-        # Batch compute embeddings using numpy
-        if VOCAB_OPTIMIZATION_CONFIG.USE_NUMPY_BATCH_OPS:
-            # Prepare batch data
-            word_ids = []
-            init_embeddings = []
+        # Prepare batch data
+        word_ids = []
+        init_embeddings = []
 
-            for word_id, word in new_words:
-                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
-                word_ids.append(word_id)
-                init_embeddings.append(init_emb)
+        for word_id, word in new_words:
+            init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+            word_ids.append(word_id)
+            init_embeddings.append(init_emb)
 
-            # Convert to numpy array for potential batch operations
-            init_embeddings = np.array(init_embeddings, dtype=np.float32)
-        else:
-            word_ids = [w[0] for w in new_words]
-            init_embeddings = [self.vocab.get_word_embedding_init(w[1], char_embeddings) for w in new_words]
+        # Convert to numpy arrays for batch sync
+        word_ids_array = np.array(word_ids, dtype=np.int32)
+        embeddings_array = np.array(init_embeddings, dtype=np.float32).flatten()
 
-        # Sync to GPU (still individual calls, but with pre-computed embeddings)
-        activated = 0
-        for i, word_id in enumerate(word_ids):
-            emb = init_embeddings[i] if isinstance(init_embeddings, np.ndarray) else init_embeddings[i]
-            emb_array = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)(*emb)
-            result = self.lib.activate_word_token(word_id, emb_array)
-            if result == 0:
-                activated += 1
+        # Create ctypes pointers
+        word_ids_ptr = word_ids_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+        embeddings_ptr = embeddings_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        # Single batch call to GPU (instead of N individual calls)
+        activated = self.lib.activate_word_tokens_batch(
+            word_ids_ptr,
+            embeddings_ptr,
+            len(word_ids)
+        )
 
         # Track performance
         elapsed = time.time() - start_time

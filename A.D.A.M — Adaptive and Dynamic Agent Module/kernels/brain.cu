@@ -2574,8 +2574,124 @@ int activate_word_token(int word_id, const float* init_embedding) {
     
     // Update count
     g_system->llm.current_word_vocab_size++;
-    
+
     return 0;
+}
+
+// Kernel per scatter batch embeddings alle posizioni corrette
+__global__ void scatter_embeddings_kernel(
+    float* word_embeddings,
+    const float* batch_embeddings,
+    const int* word_indices,
+    int num_words,
+    int embed_dim
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_words * embed_dim) return;
+
+    int word_idx = idx / embed_dim;
+    int dim_idx = idx % embed_dim;
+
+    int target_word_idx = word_indices[word_idx];
+    word_embeddings[target_word_idx * embed_dim + dim_idx] =
+        batch_embeddings[word_idx * embed_dim + dim_idx];
+}
+
+// Kernel per settare valid mask in batch
+__global__ void set_valid_mask_batch_kernel(
+    int* valid_mask,
+    const int* word_indices,
+    int num_words
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_words) return;
+
+    valid_mask[word_indices[idx]] = 1;
+}
+
+int activate_word_tokens_batch(
+    const int* word_ids,
+    const float* init_embeddings,
+    int num_words
+) {
+    /**
+     * Attiva multipli word tokens in batch (OPTIMIZED).
+     *
+     * Args:
+     *   word_ids: Array di word IDs [num_words]
+     *   init_embeddings: Embeddings iniziali [num_words * EMBED_DIM]
+     *   num_words: Numero di parole da attivare
+     *
+     * Returns:
+     *   Numero di parole attivate con successo
+     */
+    if (!g_system || num_words <= 0) {
+        return 0;
+    }
+
+    // Allocate temporary GPU buffers
+    int* d_word_indices;
+    float* d_batch_embeddings;
+
+    // Calculate word indices (word_id - CHAR_VOCAB_SIZE)
+    int* h_word_indices = (int*)malloc(num_words * sizeof(int));
+    int valid_count = 0;
+
+    for (int i = 0; i < num_words; i++) {
+        int word_idx = word_ids[i] - CHAR_VOCAB_SIZE;
+        if (word_idx >= 0 && word_idx < MAX_WORD_VOCAB_SIZE) {
+            h_word_indices[valid_count] = word_idx;
+            valid_count++;
+        }
+    }
+
+    if (valid_count == 0) {
+        free(h_word_indices);
+        return 0;
+    }
+
+    // Allocate GPU memory
+    cudaMalloc(&d_word_indices, valid_count * sizeof(int));
+    cudaMalloc(&d_batch_embeddings, valid_count * EMBED_DIM * sizeof(float));
+
+    // Copy data to GPU in TWO calls (instead of N calls)
+    cudaMemcpy(d_word_indices, h_word_indices,
+               valid_count * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_batch_embeddings, init_embeddings,
+               valid_count * EMBED_DIM * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Launch scatter kernel to copy embeddings to correct positions
+    int total_elements = valid_count * EMBED_DIM;
+    int threads = 256;
+    int blocks = (total_elements + threads - 1) / threads;
+
+    scatter_embeddings_kernel<<<blocks, threads>>>(
+        g_system->llm.word_embeddings,
+        d_batch_embeddings,
+        d_word_indices,
+        valid_count,
+        EMBED_DIM
+    );
+
+    // Launch kernel to set valid masks
+    blocks = (valid_count + threads - 1) / threads;
+    set_valid_mask_batch_kernel<<<blocks, threads>>>(
+        g_system->llm.word_valid_mask,
+        d_word_indices,
+        valid_count
+    );
+
+    cudaDeviceSynchronize();
+
+    // Cleanup
+    cudaFree(d_word_indices);
+    cudaFree(d_batch_embeddings);
+    free(h_word_indices);
+
+    // Update count
+    g_system->llm.current_word_vocab_size += valid_count;
+
+    return valid_count;
 }
 
 int deactivate_word_token(int word_id) {
