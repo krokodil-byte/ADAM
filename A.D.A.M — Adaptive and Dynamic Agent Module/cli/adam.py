@@ -108,16 +108,16 @@ def cmd_train(args):
         vocab = DynamicVocabulary.load(str(vocab_path))
     
     brain = VectLLMBrain(vocab=vocab)
-    
-    # Load checkpoint if specified
+
+    print("🧠 Starting training...")
+    brain.start()
+
+    # Load checkpoint if specified (after start to ensure system is initialized)
     if args.checkpoint:
         ckpt_path = Path(args.checkpoint)
         if ckpt_path.exists():
             print(f"   Loading checkpoint: {ckpt_path}")
             brain.load_checkpoint(str(ckpt_path))
-    
-    print("🧠 Starting training...")
-    brain.start()
     
     try:
         # Training loop
@@ -183,11 +183,11 @@ def cmd_generate(args):
         return 1
     
     brain = VectLLMBrain()
+    brain.start()
+
     print(f"   Loading: {ckpt_path}")
     brain.load_checkpoint(str(ckpt_path))
-    
-    brain.start()
-    
+
     try:
         print("\n=== Interactive Generation ===")
         print("Enter prompt (or 'quit' to exit)\n")
@@ -230,8 +230,8 @@ def cmd_stats(args):
             return 1
         
         brain = VectLLMBrain()
-        brain.load_checkpoint(str(ckpt_path))
         brain.start()
+        brain.load_checkpoint(str(ckpt_path))
         stats = brain.get_stats()
         brain.stop()
     else:
@@ -325,10 +325,11 @@ def cmd_chat(args):
             print(f"❌ Checkpoint not found: {ckpt_path}")
             return 1
         
+    brain.start()
+
+    if args.checkpoint:
         print(f"   Loading checkpoint: {ckpt_path.name}")
         brain.load_checkpoint(str(ckpt_path))
-    
-    brain.start()
     
     try:
         # Start chat
@@ -358,11 +359,12 @@ def cmd_dataset(args):
 
     # Create brain
     brain = VectLLMBrain()
+    brain.start()
+
+    # Load checkpoint after start (system must be initialized first)
     if args.checkpoint:
         print(f"   Loading checkpoint: {args.checkpoint}")
         brain.load_checkpoint(args.checkpoint)
-
-    brain.start()
 
     try:
         stats = StatsCollector()
@@ -436,11 +438,12 @@ def cmd_wikipedia(args):
 
     # Create brain
     brain = VectLLMBrain()
+    brain.start()
+
+    # Load checkpoint after start (system must be initialized first)
     if args.checkpoint:
         print(f"   Loading checkpoint: {args.checkpoint}")
         brain.load_checkpoint(args.checkpoint)
-
-    brain.start()
 
     try:
         stats = StatsCollector()

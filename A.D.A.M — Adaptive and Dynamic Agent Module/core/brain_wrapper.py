@@ -748,28 +748,37 @@ class VectLLMBrain:
     def load_checkpoint(self, filepath: str, load_vocab: bool = True) -> bool:
         """
         Carica checkpoint (brain + vocabolario).
-        
+
         Args:
             filepath: Path al checkpoint
             load_vocab: Se True, carica anche vocabolario
-            
+
         Returns:
             True se successo
         """
+        # Check initialization
+        if not self.initialized:
+            print("⚠️  System not initialized - call start() before load_checkpoint()")
+            return False
+
         # Load brain checkpoint
         result = self.lib.load_checkpoint(filepath.encode('utf-8'))
-        
+
         if result != 0:
+            print(f"⚠️  Failed to load checkpoint: {filepath} (error {result})")
             return False
-        
+
         # Load vocabulary
         if load_vocab:
             vocab_path = Path(filepath).with_suffix('.vocab')
             if vocab_path.exists():
                 self.vocab = DynamicVocabulary.load(str(vocab_path))
+                # Sync vocabulary with GPU
+                self.sync_all_vocabulary()
+                print(f"   ✅ Loaded {len(self.vocab.word_to_id)} vocab words")
             else:
                 print(f"⚠️  Vocab file not found: {vocab_path}")
-        
+
         return True
     
     def prune_vocabulary(self) -> int:
