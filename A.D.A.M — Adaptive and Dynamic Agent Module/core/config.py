@@ -41,15 +41,24 @@ class VocabOptimizationConfig:
     # Master switch
     ENABLE_VOCAB_OPTIMIZATION: bool = True  # Enable optimized sync path
 
-    # Caching (IMPLEMENTED)
+    # Caching
     CACHE_CHAR_EMBEDDINGS: bool = True  # Cache char embeddings from GPU
     CHAR_EMBEDDING_CACHE_TTL: int = 1000  # Refresh cache every N syncs
 
-    # Performance (IMPLEMENTED)
+    # Performance
     USE_NUMPY_BATCH_OPS: bool = True  # Use numpy for batch embedding computation
+    USE_BATCH_SYNC: bool = True  # Use batch GPU sync (single call for N words)
 
-    # NOTE: Hot/cold vocab architecture (P1) not yet implemented
-    # Future: MAX_HOT_VOCAB, BATCH_SYNC_SIZE, etc.
+    # Hot/Cold vocab architecture
+    ENABLE_HOT_COLD_VOCAB: bool = False  # Enable hot/cold vocab management
+    MAX_HOT_VOCAB: int = 10000  # Maximum words in GPU (hot vocab)
+    HOT_USAGE_THRESHOLD: int = 5  # Min uses to stay in hot vocab
+    HOT_REFRESH_INTERVAL: int = 1000  # Check hot/cold every N words
+    LRU_EVICTION: bool = True  # Use LRU eviction (vs frequency-based)
+
+    # AMD Infinity Cache / Unified Memory optimization
+    AMD_INFINITY_CACHE: bool = False  # Enable AMD SAM/Infinity Cache path
+    PREFER_UNIFIED_MEMORY: bool = False  # Use CUDA unified memory when available
 
 
 @dataclass
