@@ -19,12 +19,14 @@ try:
     from core.brain_wrapper import VectLLMBrain
     from core.stats import StatsCollector
     from core.pipeline import PipelinedTrainer
+    from core.config import TRAINING_CONFIG
     from Utils.checkpoint import CheckpointManager
     from modules.training_logger import get_logger
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
     from ..core.pipeline import PipelinedTrainer
+    from ..core.config import TRAINING_CONFIG
     from ..utils.checkpoint import CheckpointManager
     from ..modules.training_logger import get_logger
 
@@ -453,7 +455,10 @@ class WikipediaStreamTrainer:
                  language: str = 'en',
                  batch_size: int = 100,
                  stats_collector: Optional[StatsCollector] = None,
-                 checkpoint_manager: Optional[CheckpointManager] = None):
+                 checkpoint_manager: Optional[CheckpointManager] = None,
+                 validation_articles: int = None,
+                 validation_frequency: int = None,
+                 early_stopping_patience: int = None):
         """
         Args:
             brain: Istanza VectLLMBrain
@@ -461,6 +466,9 @@ class WikipediaStreamTrainer:
             batch_size: Number of articles per batch
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
+            validation_articles: Number of articles to use for validation (default: 10% of batch_size)
+            validation_frequency: Validate every N articles (default from config)
+            early_stopping_patience: Stop after N validations without improvement (default from config)
         """
         self.brain = brain
         self.fetcher = WikipediaAPIFetcher(
@@ -471,13 +479,81 @@ class WikipediaStreamTrainer:
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
         self.logger = get_logger()
 
+        # Validation settings
+        self.validation_articles = validation_articles or max(1, int(batch_size * 0.1))
+        self.validation_frequency = validation_frequency or TRAINING_CONFIG.VALIDATION_FREQUENCY
+        self.early_stopping_patience = early_stopping_patience or TRAINING_CONFIG.EARLY_STOPPING_PATIENCE
+
+        # Validation state
+        self.val_articles: List[Tuple[str, str]] = []
+        self.best_val_loss = float('inf')
+        self.validations_without_improvement = 0
+
+    def _fetch_validation_articles(self):
+        """Fetch articles for validation set."""
+        if self.validation_articles <= 0:
+            return
+
+        self.logger.info(f"Fetching {self.validation_articles} validation articles...")
+
+        # Create temporary fetcher for validation
+        val_fetcher = WikipediaAPIFetcher(
+            language=self.fetcher.language,
+            batch_size=self.validation_articles
+        )
+        val_fetcher.fetch_batch()
+        self.val_articles = list(val_fetcher.get_articles())
+
+        self.logger.info(f"  Validation set: {len(self.val_articles)} articles")
+
+    def _run_validation(self) -> float:
+        """
+        Run validation on validation articles.
+
+        Returns:
+            Average validation loss
+        """
+        if not self.val_articles:
+            return -1.0
+
+        total_loss = 0.0
+        count = 0
+
+        for title, text in self.val_articles:
+            loss = self.brain.validate_on_text(text)
+            if loss >= 0:
+                total_loss += loss
+                count += 1
+
+        if count == 0:
+            return -1.0
+
+        avg_loss = total_loss / count
+
+        # Update stats
+        self.stats.metrics.validation_loss = avg_loss
+        self.stats.metrics.validation_history.append((time.time(), avg_loss))
+
+        # Check for improvement
+        if avg_loss < self.best_val_loss:
+            self.best_val_loss = avg_loss
+            self.stats.metrics.best_validation_loss = avg_loss
+            self.validations_without_improvement = 0
+        else:
+            self.validations_without_improvement += 1
+            self.stats.metrics.validations_without_improvement = self.validations_without_improvement
+
+        return avg_loss
+
     def train(self,
               max_articles: Optional[int] = None,
               passes_per_batch: int = 1,
               auto_save_every: int = 100,
               verbose: bool = True,
               use_pipeline: bool = True,
-              prefetch_size: int = 3) -> dict:
+              prefetch_size: int = 3,
+              enable_validation: bool = True,
+              enable_early_stopping: bool = True) -> dict:
         """
         Train continuously on Wikipedia articles.
 
@@ -494,29 +570,45 @@ class WikipediaStreamTrainer:
             verbose: Stampa progress
             use_pipeline: Usa training pipelinato per overlap CPU/GPU
             prefetch_size: Numero batch da pre-caricare (se use_pipeline)
+            enable_validation: Run validation during training
+            enable_early_stopping: Stop if validation doesn't improve
 
         Returns:
             Dict con statistiche finali
         """
+        # Fetch validation articles first
+        if enable_validation and not self.val_articles:
+            self._fetch_validation_articles()
+
         if verbose:
             self.logger.training_start(
                 "Wikipedia Stream",
                 language=self.fetcher.language,
                 batch_size=f"{self.fetcher.batch_size} articles",
+                validation_articles=len(self.val_articles) if enable_validation else 0,
                 max_articles=max_articles or 'unlimited',
                 passes_per_batch=passes_per_batch,
-                pipeline='enabled' if use_pipeline else 'disabled'
+                pipeline='enabled' if use_pipeline else 'disabled',
+                validation='enabled' if enable_validation and self.val_articles else 'disabled'
             )
 
         total_tokens = 0
         articles_processed = 0
         batch_num = 0
         start_time = time.time()
+        early_stopped = False
 
         try:
             while True:
                 # Check if we've reached max articles
                 if max_articles and articles_processed >= max_articles:
+                    break
+
+                # Check early stopping
+                if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
+                    if verbose:
+                        self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                    early_stopped = True
                     break
 
                 batch_num += 1
@@ -544,7 +636,8 @@ class WikipediaStreamTrainer:
                         # Pipelined training - overlap CPU encoding with GPU training
                         batch_tokens += self._train_batch_pipelined(
                             fetched, pass_num, max_articles, articles_processed,
-                            auto_save_every, verbose, prefetch_size
+                            auto_save_every, verbose, prefetch_size,
+                            enable_validation, enable_early_stopping
                         )
                         if pass_num == 1:
                             articles_processed += fetched
@@ -613,15 +706,27 @@ class WikipediaStreamTrainer:
         elapsed = time.time() - start_time
         final_stats = self.stats.get_summary()
 
+        # Add validation stats
+        final_stats['validation_loss'] = self.stats.metrics.validation_loss
+        final_stats['best_validation_loss'] = self.best_val_loss
+        final_stats['early_stopped'] = early_stopped
+
         if verbose:
-            self.logger.training_end(
-                batches=batch_num,
-                articles=articles_processed,
-                tokens=total_tokens,
-                speed=total_tokens/elapsed if elapsed > 0 else 0,
-                loss=final_stats['loss'],
-                vocab=final_stats['vocab_size']
-            )
+            end_kwargs = {
+                'batches': batch_num,
+                'articles': articles_processed,
+                'tokens': total_tokens,
+                'speed': total_tokens/elapsed if elapsed > 0 else 0,
+                'loss': final_stats['loss'],
+                'vocab': final_stats['vocab_size']
+            }
+            if self.val_articles:
+                end_kwargs['validation_loss'] = self.stats.metrics.validation_loss
+                end_kwargs['best_val_loss'] = self.best_val_loss
+            if early_stopped:
+                end_kwargs['status'] = 'early_stopped'
+
+            self.logger.training_end(**end_kwargs)
 
         return final_stats
 
@@ -632,7 +737,9 @@ class WikipediaStreamTrainer:
                                 articles_processed: int,
                                 auto_save_every: int,
                                 verbose: bool,
-                                prefetch_size: int) -> int:
+                                prefetch_size: int,
+                                enable_validation: bool = True,
+                                enable_early_stopping: bool = True) -> int:
         """
         Train on batch using pipelined CPU/GPU overlap.
 
@@ -644,6 +751,8 @@ class WikipediaStreamTrainer:
             auto_save_every: Auto-save interval
             verbose: Verbose output
             prefetch_size: Prefetch queue size
+            enable_validation: Run validation during training
+            enable_early_stopping: Stop if validation doesn't improve
 
         Returns:
             Tokens processed in this batch
@@ -683,6 +792,12 @@ class WikipediaStreamTrainer:
                 self.logger.article_progress(
                     processed_count[0], title, tokens, stats['loss'], stats['vocab_words']
                 )
+
+            # Validation check
+            if enable_validation and self.val_articles and article_num % self.validation_frequency == 0:
+                val_loss = self._run_validation()
+                if verbose:
+                    self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
 
             # Auto-save check
             if article_num % auto_save_every == 0 and article_num > last_save_article[0]:
