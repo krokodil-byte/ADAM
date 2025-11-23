@@ -483,7 +483,8 @@ def cmd_wikipedia(args):
                 batch_size=args.batch_size,
                 stats_collector=stats,
                 checkpoint_manager=ckpt_manager,
-                validation_articles=args.val_articles
+                validation_articles=args.val_articles,
+                validate_per_pass=args.validate_per_pass
             )
 
             trainer.train(
@@ -654,6 +655,10 @@ def main():
                             help='Stop when validation stops improving')
     parser_wiki.add_argument('--val-articles', type=int, dest='val_articles', default=10,
                             help='Number of articles for validation (default: 10)')
+    parser_wiki.add_argument('--validate-per-pass', action='store_true', dest='validate_per_pass',
+                            default=True, help='Validate at end of each pass (default)')
+    parser_wiki.add_argument('--no-validate-per-pass', action='store_false', dest='validate_per_pass',
+                            help='Validate every N articles instead of per pass')
     # Vocab optimization options
     parser_wiki.add_argument('--no-vocab-opt', action='store_true', dest='no_vocab_opt',
                             help='Disable vocab optimization')
