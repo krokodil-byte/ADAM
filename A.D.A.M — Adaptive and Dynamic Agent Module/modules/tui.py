@@ -26,11 +26,15 @@ except ImportError:
 class ADAMTUI:
     """TUI completa per A.D.A.M"""
 
+    # Settings file path
+    SETTINGS_FILE = Path.home() / ".adam" / "tui_settings.json"
+
     def __init__(self):
         self.current_menu = 'main'
         self.selected_item = 0
         self.message = ""
         self.message_type = "info"
+        self.should_exit = False
 
         # Stored values for operations
         self.values = {
@@ -54,6 +58,9 @@ class ADAMTUI:
             'max_hot_vocab': 10000,
             'batch_sync_size': 100,
         }
+
+        # Load saved settings
+        self._load_settings()
 
         # Menu definitions
         self.menus = {
@@ -219,9 +226,34 @@ class ADAMTUI:
             }
         }
 
+    def _load_settings(self):
+        """Load settings from file"""
+        try:
+            if self.SETTINGS_FILE.exists():
+                with open(self.SETTINGS_FILE, 'r') as f:
+                    saved = json.load(f)
+                    # Update only existing keys
+                    for key, value in saved.items():
+                        if key in self.values:
+                            self.values[key] = value
+        except Exception:
+            pass  # Use defaults if load fails
+
+    def _save_settings_to_file(self):
+        """Save settings to file"""
+        try:
+            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.SETTINGS_FILE, 'w') as f:
+                json.dump(self.values, f, indent=2)
+            return True
+        except Exception as e:
+            return False
+
     def run(self):
         """Start TUI"""
         curses.wrapper(self._main_loop)
+        # Save settings on exit
+        self._save_settings_to_file()
 
     def _main_loop(self, stdscr):
         """Main curses loop"""
@@ -236,7 +268,7 @@ class ADAMTUI:
         curses.init_pair(4, curses.COLOR_RED, -1)
         curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)
 
-        while True:
+        while not self.should_exit:
             stdscr.clear()
             height, width = stdscr.getmaxyx()
             menu = self.menus[self.current_menu]
@@ -300,7 +332,7 @@ class ADAMTUI:
 
             if key == ord('q') or key == ord('Q'):
                 if self.current_menu == 'main':
-                    break
+                    self.should_exit = True
                 else:
                     self.current_menu = 'main'
                     self.selected_item = 0
@@ -379,7 +411,8 @@ class ADAMTUI:
             self.selected_item = 0
             return
         elif key == 'quit':
-            return  # Will exit loop
+            self.should_exit = True
+            return
 
         # Settings categories - handle BEFORE menu navigation
         # so we call _edit_settings instead of navigating to their menus
@@ -710,8 +743,13 @@ class ADAMTUI:
         try:
             with open(config_path, 'w') as f:
                 json.dump(self.settings, f, indent=2)
-            self.message = f"✓ Saved to {config_path}"
-            self.message_type = "success"
+            # Also save TUI values
+            if self._save_settings_to_file():
+                self.message = f"✓ Saved settings"
+                self.message_type = "success"
+            else:
+                self.message = f"✓ Config saved, TUI values failed"
+                self.message_type = "success"
         except Exception as e:
             self.message = f"✗ Save failed: {e}"
             self.message_type = "error"
