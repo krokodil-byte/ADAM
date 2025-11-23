@@ -36,7 +36,12 @@ class TrainingLogger:
         """
         self.logger = logging.getLogger(name)
         self.logger.setLevel(level)
-        self.logger.handlers = []  # Clear existing handlers
+
+        # Prevent propagation to root logger to avoid duplicates
+        self.logger.propagate = False
+
+        # Clear existing handlers to avoid duplicates
+        self.logger.handlers = []
 
         # Custom formatter
         formatter = logging.Formatter(
@@ -60,6 +65,7 @@ class TrainingLogger:
 
         self.start_time = None
         self.current_task = None
+        self._console = console
 
     # === Core logging methods ===
 
@@ -179,9 +185,65 @@ class TrainingLogger:
         """Log pipeline performance stats."""
         self.info(f"  Pipeline: {throughput:.0f} tok/s, GPU util={gpu_util:.1%}")
 
+    # === Validation methods ===
+
+    def validation_start(self, num_samples: int):
+        """Log start of validation."""
+        self._flush()
+        self.info(f"--- Validation ({num_samples} samples) ---")
+
+    def validation_result(self, val_loss: float, best_loss: float, improved: bool):
+        """Log validation result."""
+        status = "NEW BEST" if improved else f"best: {best_loss:.4f}"
+        self.info(f"  Validation loss: {val_loss:.4f} ({status})")
+
+    def validation_early_stop(self, patience: int):
+        """Log early stopping triggered."""
+        self._flush()
+        self.warning(f"Early stopping: no improvement for {patience} validations")
+
+    def validation_complete(self):
+        """Log validation complete - returns to normal training."""
+        self._flush()
+
+    # === Utility methods ===
+
+    def _flush(self):
+        """Flush stdout to ensure clean output."""
+        if self._console:
+            sys.stdout.flush()
+
+    def separator(self, char: str = "-", length: int = 50):
+        """Print a separator line."""
+        self.info(char * length)
+
+    def blank_line(self):
+        """Print a blank line for readability."""
+        self.info("")
+
 
 # Global logger instance
 _global_logger: Optional[TrainingLogger] = None
+
+
+def configure_root_logger(level: int = logging.WARNING):
+    """
+    Configure the root logger to reduce noise from other modules.
+
+    By default, sets root logger to WARNING to suppress INFO/DEBUG from
+    modules that use logging.getLogger(__name__) directly.
+    """
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Clear existing handlers to avoid duplicates
+    root.handlers = []
+
+    # Add a simple handler for warnings/errors
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(level)
+    handler.setFormatter(logging.Formatter('%(name)s | %(levelname)s | %(message)s'))
+    root.addHandler(handler)
 
 
 def get_logger(
@@ -205,6 +267,8 @@ def get_logger(
     global _global_logger
 
     if _global_logger is None:
+        # Configure root logger to suppress noise from other modules
+        configure_root_logger(logging.WARNING)
         _global_logger = TrainingLogger(name, level, log_file, console)
 
     return _global_logger
@@ -231,3 +295,12 @@ def add_file_handler(log_file: Path):
         file_handler.setLevel(_global_logger.logger.level)
         file_handler.setFormatter(formatter)
         _global_logger.logger.addHandler(file_handler)
+
+
+def reset_logger():
+    """Reset the global logger instance. Call this if you need to reconfigure."""
+    global _global_logger
+    if _global_logger:
+        # Clear handlers
+        _global_logger.logger.handlers = []
+    _global_logger = None
