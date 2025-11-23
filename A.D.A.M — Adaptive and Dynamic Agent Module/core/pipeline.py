@@ -14,6 +14,8 @@ import ctypes
 import threading
 import queue
 import time
+import multiprocessing as mp
+from multiprocessing import Pool, Queue as MPQueue
 from typing import List, Iterator, Optional, Callable, Any
 from dataclasses import dataclass
 import numpy as np
@@ -182,6 +184,214 @@ class AsyncBatchLoader:
         }
 
 
+# Global encode function for multiprocessing (must be picklable)
+_mp_encode_fn = None
+_mp_vocab = None
+
+def _mp_init_worker(vocab_data):
+    """Initialize worker with vocabulary data."""
+    global _mp_vocab
+    _mp_vocab = vocab_data
+
+def _mp_encode_worker(text: str) -> List[int]:
+    """Worker function for multiprocessing encode."""
+    global _mp_encode_fn
+    if _mp_encode_fn is None:
+        return []
+    try:
+        return _mp_encode_fn(text)
+    except Exception:
+        return []
+
+
+class MultiProcessBatchLoader:
+    """
+    Loader con multiprocessing per encoding parallelo.
+
+    Usa Pool di processi per bypassare il GIL Python e ottenere
+    vero parallelismo CPU per l'encoding.
+    """
+
+    def __init__(self,
+                 encode_fn: Callable[[str], List[int]],
+                 num_workers: int = None,
+                 prefetch_size: int = 3,
+                 max_batch_tokens: int = 512):
+        """
+        Args:
+            encode_fn: Funzione per encoding testo → tokens
+            num_workers: Numero di worker (default: CPU count)
+            prefetch_size: Numero di batch da preparare in anticipo
+            max_batch_tokens: Massimo token per batch
+        """
+        self.encode_fn = encode_fn
+        self.num_workers = num_workers or PERFORMANCE_CONFIG.NUM_CPU_WORKERS
+        self.prefetch_size = prefetch_size
+        self.max_batch_tokens = max_batch_tokens
+
+        # Queue per batch preparati (thread-safe)
+        self.batch_queue: queue.Queue = queue.Queue(maxsize=prefetch_size * 2)
+
+        # Control
+        self.running = False
+        self.pool: Optional[Pool] = None
+        self.collector_thread: Optional[threading.Thread] = None
+        self.pending_results = []
+        self.results_lock = threading.Lock()
+
+        # Stats
+        self.batches_prepared = 0
+        self.total_tokens_prepared = 0
+        self.avg_encode_time = 0.0
+        self.batch_id = 0
+
+    def start(self):
+        """Avvia pool di worker"""
+        if self.running:
+            return
+
+        # IMPORTANT: Set global encode function BEFORE creating pool
+        # This way fork() will copy the global to child processes
+        global _mp_encode_fn
+        _mp_encode_fn = self.encode_fn
+
+        self.running = True
+
+        # Create process pool
+        # Use 'fork' on Linux (shares memory including globals)
+        import sys
+        try:
+            if sys.platform == 'linux':
+                # Fork shares global state including _mp_encode_fn
+                ctx = mp.get_context('fork')
+                self.pool = ctx.Pool(processes=self.num_workers)
+            else:
+                # On non-Linux, multiprocessing encoding won't work well
+                # Fall back to single process with warning
+                print(f"⚠️  Multiprocessing encoding only fully supported on Linux")
+                self.pool = Pool(processes=self.num_workers)
+        except Exception as e:
+            print(f"⚠️  Failed to create process pool: {e}")
+            self.pool = Pool(processes=self.num_workers)
+
+        # Start collector thread
+        self.collector_thread = threading.Thread(target=self._collector_loop, daemon=True)
+        self.collector_thread.start()
+
+    def stop(self):
+        """Ferma pool di worker"""
+        self.running = False
+
+        # Close pool
+        if self.pool:
+            self.pool.close()
+            self.pool.terminate()
+            self.pool.join()
+            self.pool = None
+
+        # Stop collector
+        if self.collector_thread:
+            self.collector_thread.join(timeout=2.0)
+
+    def submit(self, text: str):
+        """Sottometti testo per encoding parallelo"""
+        if not self.running or not self.pool:
+            return
+
+        # Submit to pool asynchronously
+        result = self.pool.apply_async(_mp_encode_worker, (text,))
+
+        with self.results_lock:
+            self.pending_results.append((result, len(text), time.time()))
+
+    def _collector_loop(self):
+        """Loop per raccogliere risultati dai worker"""
+        while self.running:
+            results_to_process = []
+
+            # Collect ready results
+            with self.results_lock:
+                remaining = []
+                for result, text_len, start_time in self.pending_results:
+                    if result.ready():
+                        results_to_process.append((result, text_len, start_time))
+                    else:
+                        remaining.append((result, text_len, start_time))
+                self.pending_results = remaining
+
+            # Process ready results
+            for result, text_len, start_time in results_to_process:
+                try:
+                    tokens = result.get(timeout=0.1)
+                    encode_time = time.time() - start_time
+                    self.avg_encode_time = 0.9 * self.avg_encode_time + 0.1 * encode_time
+
+                    if not tokens:
+                        continue
+
+                    # Split in batch se necessario
+                    for i in range(0, len(tokens), self.max_batch_tokens):
+                        batch_tokens = tokens[i:i + self.max_batch_tokens]
+
+                        batch = BatchData(
+                            tokens=batch_tokens,
+                            text_length=text_len,
+                            batch_id=self.batch_id
+                        )
+
+                        # Put in queue (may block if full - backpressure)
+                        try:
+                            self.batch_queue.put(batch, timeout=0.1)
+                            self.batch_id += 1
+                            self.batches_prepared += 1
+                            self.total_tokens_prepared += len(batch_tokens)
+                        except queue.Full:
+                            # Queue full, will retry
+                            pass
+
+                except Exception as e:
+                    print(f"⚠️  Multiprocess encode error: {e}")
+
+            # Small sleep to avoid busy loop
+            time.sleep(0.01)
+
+    def get_batch(self, timeout: float = 1.0) -> Optional[BatchData]:
+        """Ottieni prossimo batch preparato."""
+        try:
+            return self.batch_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def get_batch_nowait(self) -> Optional[BatchData]:
+        """Ottieni batch senza bloccare"""
+        try:
+            return self.batch_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def has_batches(self) -> bool:
+        """Check se ci sono batch pronti"""
+        return not self.batch_queue.empty()
+
+    def pending_count(self) -> int:
+        """Numero di batch in attesa"""
+        return self.batch_queue.qsize()
+
+    def get_stats(self) -> dict:
+        """Statistiche loader"""
+        with self.results_lock:
+            pending = len(self.pending_results)
+
+        return {
+            'batches_prepared': self.batches_prepared,
+            'total_tokens': self.total_tokens_prepared,
+            'avg_encode_time_ms': self.avg_encode_time * 1000,
+            'queue_size': self.batch_queue.qsize(),
+            'pending_encodes': pending,
+            'num_workers': self.num_workers,
+        }
+
+
 class PipelinedTrainer:
     """
     Trainer con pipeline CPU↔GPU.
@@ -194,19 +404,38 @@ class PipelinedTrainer:
 
     def __init__(self,
                  brain,  # VectLLMBrain
-                 prefetch_size: int = 3):
+                 prefetch_size: int = None,
+                 num_workers: int = None):
         """
         Args:
             brain: Istanza VectLLMBrain
-            prefetch_size: Batch da prefetchare
+            prefetch_size: Batch da prefetchare (default from config)
+            num_workers: CPU workers (default from config, >1 uses multiprocessing)
         """
         self.brain = brain
 
-        # Async loader
-        self.loader = AsyncBatchLoader(
-            encode_fn=brain.encode_text,
-            prefetch_size=prefetch_size
-        )
+        # Get defaults from config
+        if prefetch_size is None:
+            prefetch_size = PERFORMANCE_CONFIG.PREFETCH_SIZE
+        if num_workers is None:
+            num_workers = PERFORMANCE_CONFIG.NUM_CPU_WORKERS
+
+        # Choose loader based on num_workers
+        if num_workers > 1:
+            # Use multiprocessing for parallel encoding
+            self.loader = MultiProcessBatchLoader(
+                encode_fn=brain.encode_text,
+                num_workers=num_workers,
+                prefetch_size=prefetch_size
+            )
+            self._use_multiprocess = True
+        else:
+            # Single thread (original behavior)
+            self.loader = AsyncBatchLoader(
+                encode_fn=brain.encode_text,
+                prefetch_size=prefetch_size
+            )
+            self._use_multiprocess = False
 
         # Stats
         self.total_batches = 0

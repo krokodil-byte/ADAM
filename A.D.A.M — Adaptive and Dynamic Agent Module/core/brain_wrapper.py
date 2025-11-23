@@ -215,6 +215,11 @@ class VectLLMBrain:
         self._hot_vocab_ids: set = set()  # word_ids currently in GPU
         self._word_usage_count: Dict[int, int] = {}  # word_id -> usage count
 
+        # Deferred sync for validation (avoid GPU contention)
+        self._defer_sync = False
+        self._deferred_old_size = None
+        self._deferred_new_size = None
+
         # GPU vendor detection for optimization paths
         self._gpu_vendor = detect_gpu_vendor()
 
@@ -436,12 +441,35 @@ class VectLLMBrain:
         old_vocab_size = len(self.vocab.word_to_id)
         tokens = self.vocab.encode(text)
         new_vocab_size = len(self.vocab.word_to_id)
-        
+
         # Se vocabolario è cresciuto, sincronizza con kernel
         if new_vocab_size > old_vocab_size:
-            self._sync_new_words(old_vocab_size, new_vocab_size)
-        
+            if self._defer_sync:
+                # Queue sync for later (avoid GPU contention during validation)
+                if self._deferred_old_size is None:
+                    self._deferred_old_size = old_vocab_size
+                self._deferred_new_size = new_vocab_size
+            else:
+                self._sync_new_words(old_vocab_size, new_vocab_size)
+
         return tokens
+
+    def begin_validation(self):
+        """Start validation mode - defer GPU syncs to avoid contention."""
+        self._defer_sync = True
+        self._deferred_old_size = None
+        self._deferred_new_size = None
+
+    def end_validation(self):
+        """End validation mode - sync any deferred words."""
+        self._defer_sync = False
+
+        # Sync all deferred words in one batch
+        if self._deferred_old_size is not None and self._deferred_new_size is not None:
+            self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
+
+        self._deferred_old_size = None
+        self._deferred_new_size = None
     
     def decode_tokens(self, tokens: List[int]) -> str:
         """Decode tokens a text"""
