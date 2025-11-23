@@ -22,6 +22,7 @@ try:
     from core.vocabulary import DynamicVocabulary
     from core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG,
+        VOCAB_OPTIMIZATION_CONFIG,
         set_config_from_preset
     )
     from core.stats import StatsCollector
@@ -36,6 +37,7 @@ except ImportError:
     from ..core.vocabulary import DynamicVocabulary
     from ..core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG,
+        VOCAB_OPTIMIZATION_CONFIG,
         set_config_from_preset
     )
     from ..core.stats import StatsCollector
@@ -354,6 +356,14 @@ def cmd_dataset(args):
     if args.preset:
         set_config_from_preset(args.preset)
 
+    # Apply vocab optimization settings
+    if hasattr(args, 'no_vocab_opt') and args.no_vocab_opt:
+        VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION = False
+    if hasattr(args, 'max_hot_vocab') and args.max_hot_vocab:
+        VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB = args.max_hot_vocab
+    if hasattr(args, 'batch_sync_size') and args.batch_sync_size:
+        VOCAB_OPTIMIZATION_CONFIG.BATCH_SYNC_SIZE = args.batch_sync_size
+
     # Detect dataset type: HuggingFace (JSONL/Parquet/CSV) or plain text
     is_hf_format = dataset_path.suffix.lower() in ['.jsonl', '.json', '.parquet', '.csv', '.tsv']
 
@@ -435,6 +445,14 @@ def cmd_wikipedia(args):
     # Apply preset if specified
     if args.preset:
         set_config_from_preset(args.preset)
+
+    # Apply vocab optimization settings
+    if hasattr(args, 'no_vocab_opt') and args.no_vocab_opt:
+        VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION = False
+    if hasattr(args, 'max_hot_vocab') and args.max_hot_vocab:
+        VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB = args.max_hot_vocab
+    if hasattr(args, 'batch_sync_size') and args.batch_sync_size:
+        VOCAB_OPTIMIZATION_CONFIG.BATCH_SYNC_SIZE = args.batch_sync_size
 
     # Create brain
     brain = VectLLMBrain()
@@ -615,7 +633,14 @@ def main():
                                help='Stop when validation stops improving')
     parser_dataset.add_argument('--val-split', type=float, dest='val_split', default=0.1,
                                help='Validation split fraction (default: 0.1)')
-    
+    # Vocab optimization options
+    parser_dataset.add_argument('--no-vocab-opt', action='store_true', dest='no_vocab_opt',
+                               help='Disable vocab optimization')
+    parser_dataset.add_argument('--max-hot-vocab', type=int, dest='max_hot_vocab',
+                               help='Max hot vocab size in GPU (default: 10000)')
+    parser_dataset.add_argument('--batch-sync-size', type=int, dest='batch_sync_size',
+                               help='Words per batch sync (default: 100)')
+
     # WIKIPEDIA command
     parser_wiki = subparsers.add_parser('wikipedia', help='Train on Wikipedia (dump or API)')
     parser_wiki.add_argument('dump', nargs='?', default=None,
@@ -641,6 +666,13 @@ def main():
                             help='Stop when validation stops improving')
     parser_wiki.add_argument('--val-articles', type=int, dest='val_articles', default=10,
                             help='Number of articles for validation (default: 10)')
+    # Vocab optimization options
+    parser_wiki.add_argument('--no-vocab-opt', action='store_true', dest='no_vocab_opt',
+                            help='Disable vocab optimization')
+    parser_wiki.add_argument('--max-hot-vocab', type=int, dest='max_hot_vocab',
+                            help='Max hot vocab size in GPU (default: 10000)')
+    parser_wiki.add_argument('--batch-sync-size', type=int, dest='batch_sync_size',
+                            help='Words per batch sync (default: 100)')
 
     # DASHBOARD/TUI command (alias for running without args)
     parser_dashboard = subparsers.add_parser('dashboard', help='Open A.D.A.M TUI dashboard')

@@ -14,12 +14,12 @@ from typing import Any, Dict, List, Optional
 try:
     from core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG,
-        PERFORMANCE_CONFIG, GENERATION_CONFIG
+        PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG
     )
 except ImportError:
     from ..core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG, RUNTIME_CONFIG,
-        PERFORMANCE_CONFIG, GENERATION_CONFIG
+        PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG
     )
 
 
@@ -49,6 +49,10 @@ class ADAMTUI:
             'validation_split': 0.1,
             'validation_articles': 10,
             'early_stopping': True,
+            # Vocab optimization settings
+            'vocab_opt_enabled': True,
+            'max_hot_vocab': 10000,
+            'batch_sync_size': 100,
         }
 
         # Menu definitions
@@ -120,9 +124,19 @@ class ADAMTUI:
                     ('training', '📈 Training Parameters', 'Learning rate, momentum'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU optimizations, pipeline, kernels'),
+                    ('vocab_opt', '🔤 Vocab Optimization', 'CPU/GPU hybrid vocab settings'),
                     ('system', '🖥️  System', 'CUDA, checkpoints'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
+                ]
+            },
+            'vocab_opt': {
+                'title': 'Vocab Optimization Settings',
+                'items': [
+                    ('enabled', '✓ Enable Optimization', 'Enable vocab optimization pipeline'),
+                    ('max_hot', '🔥 Max Hot Vocab', 'Maximum hot embeddings in GPU'),
+                    ('batch_sync', '📦 Batch Sync Size', 'Words per GPU sync batch'),
+                    ('back', '← Back', 'Return to settings'),
                 ]
             },
             'generation': {
@@ -345,13 +359,20 @@ class ADAMTUI:
             return str(self.values['validation_articles'])
         elif key == 'val_split':
             return f"{self.values['validation_split']:.0%}"
+        # Vocab optimization values
+        elif key == 'enabled':
+            return "enabled" if self.values['vocab_opt_enabled'] else "disabled"
+        elif key == 'max_hot':
+            return str(self.values['max_hot_vocab'])
+        elif key == 'batch_sync':
+            return str(self.values['batch_sync_size'])
         return ""
 
     def _handle_selection(self, stdscr, key: str):
         """Handle menu item selection"""
         # Navigation
         if key == 'back':
-            if self.current_menu in ['generation', 'performance']:
+            if self.current_menu in ['generation', 'performance', 'vocab_opt']:
                 self.current_menu = 'settings'
             else:
                 self.current_menu = 'main'
@@ -376,6 +397,10 @@ class ADAMTUI:
             return
         elif key == 'system':
             self._edit_settings(stdscr, 'system')
+            return
+        elif key == 'vocab_opt':
+            self.current_menu = 'vocab_opt'
+            self.selected_item = 0
             return
         elif key == 'save':
             self._save_settings()
@@ -481,6 +506,29 @@ class ADAMTUI:
             if value is not None:
                 try:
                     self.values['validation_split'] = float(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+
+        # Vocab optimization inputs
+        elif key == 'enabled':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "Vocab Optimization", options)
+            if idx >= 0:
+                self.values['vocab_opt_enabled'] = (idx == 0)
+        elif key == 'max_hot':
+            value = self._input_dialog(stdscr, "Max Hot Vocab", str(self.values['max_hot_vocab']))
+            if value is not None:
+                try:
+                    self.values['max_hot_vocab'] = int(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+        elif key == 'batch_sync':
+            value = self._input_dialog(stdscr, "Batch Sync Size", str(self.values['batch_sync_size']))
+            if value is not None:
+                try:
+                    self.values['batch_sync_size'] = int(value)
                 except ValueError:
                     self.message = "Invalid number"
                     self.message_type = "error"
@@ -707,6 +755,13 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        # Vocab optimization
+        if not self.values['vocab_opt_enabled']:
+            cmd += " --no-vocab-opt"
+        if self.values['max_hot_vocab'] != 10000:
+            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
+        if self.values['batch_sync_size'] != 100:
+            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -736,6 +791,13 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        # Vocab optimization
+        if not self.values['vocab_opt_enabled']:
+            cmd += " --no-vocab-opt"
+        if self.values['max_hot_vocab'] != 10000:
+            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
+        if self.values['batch_sync_size'] != 100:
+            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -768,6 +830,13 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        # Vocab optimization
+        if not self.values['vocab_opt_enabled']:
+            cmd += " --no-vocab-opt"
+        if self.values['max_hot_vocab'] != 10000:
+            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
+        if self.values['batch_sync_size'] != 100:
+            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
