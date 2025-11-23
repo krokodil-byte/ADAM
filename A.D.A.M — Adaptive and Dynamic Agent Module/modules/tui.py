@@ -59,7 +59,10 @@ class ADAMTUI:
             'batch_sync_size': 100,
         }
 
-        # Load saved settings
+        # Settings data - must be initialized BEFORE _load_settings
+        self.settings = self._load_default_settings()
+
+        # Load saved settings (updates both self.values and self.settings)
         self._load_settings()
 
         # Menu definitions
@@ -177,9 +180,6 @@ class ADAMTUI:
             },
         }
 
-        # Settings data
-        self.settings = self._load_default_settings()
-
     def _load_default_settings(self) -> Dict[str, Dict[str, Any]]:
         """Load default settings from config"""
         return {
@@ -232,12 +232,30 @@ class ADAMTUI:
             if self.SETTINGS_FILE.exists():
                 with open(self.SETTINGS_FILE, 'r') as f:
                     saved = json.load(f)
-                    # Update only existing keys
                     loaded_count = 0
-                    for key, value in saved.items():
-                        if key in self.values:
-                            self.values[key] = value
-                            loaded_count += 1
+
+                    # Load values (operational settings)
+                    if 'values' in saved:
+                        for key, value in saved['values'].items():
+                            if key in self.values:
+                                self.values[key] = value
+                                loaded_count += 1
+                    else:
+                        # Legacy format - direct values
+                        for key, value in saved.items():
+                            if key in self.values:
+                                self.values[key] = value
+                                loaded_count += 1
+
+                    # Load settings (config parameters)
+                    if 'settings' in saved:
+                        for category, settings in saved['settings'].items():
+                            if category in self.settings:
+                                for key, value in settings.items():
+                                    if key in self.settings[category]:
+                                        self.settings[category][key] = value
+                                        loaded_count += 1
+
                     if loaded_count > 0:
                         print(f"✓ Loaded {loaded_count} settings from {self.SETTINGS_FILE}")
         except Exception as e:
@@ -247,8 +265,13 @@ class ADAMTUI:
         """Save settings to file"""
         try:
             self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            # Save both values and settings
+            data = {
+                'values': self.values,
+                'settings': self.settings
+            }
             with open(self.SETTINGS_FILE, 'w') as f:
-                json.dump(self.values, f, indent=2)
+                json.dump(data, f, indent=2)
             if not silent:
                 print(f"✓ Settings saved to {self.SETTINGS_FILE}")
             return True
