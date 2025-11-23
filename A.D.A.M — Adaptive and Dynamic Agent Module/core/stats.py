@@ -16,27 +16,33 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TrainingMetrics:
     """Metriche di training"""
-    
+
     # Contatori
     total_cycles: int = 0
     total_tokens: int = 0
-    
+
     # Loss tracking
     current_loss: float = 0.0
     loss_history: deque = field(default_factory=lambda: deque(maxlen=1000))
-    
+
+    # Validation metrics
+    validation_loss: float = 0.0
+    best_validation_loss: float = float('inf')
+    validation_history: deque = field(default_factory=lambda: deque(maxlen=100))
+    validations_without_improvement: int = 0
+
     # Performance
     tokens_per_second: float = 0.0
     cycles_per_second: float = 0.0
-    
+
     # Timing
     start_time: float = field(default_factory=time.time)
     last_update: float = field(default_factory=time.time)
-    
+
     # Vocabulary
     vocab_size: int = 0
     vocab_utilization: float = 0.0
-    
+
     # Model state
     temperature: float = 1.0
     momentum: float = 0.9

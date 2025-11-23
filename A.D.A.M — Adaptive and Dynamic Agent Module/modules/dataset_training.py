@@ -12,6 +12,7 @@ Supporta:
 import os
 import json
 import csv
+import random
 from pathlib import Path
 from typing import List, Optional, Iterator, Dict, Tuple, Any
 import time
@@ -21,12 +22,14 @@ try:
     from core.brain_wrapper import VectLLMBrain
     from core.stats import StatsCollector
     from core.pipeline import PipelinedTrainer
+    from core.config import TRAINING_CONFIG
     from Utils.checkpoint import CheckpointManager
     from modules.training_logger import get_logger
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
     from ..core.pipeline import PipelinedTrainer
+    from ..core.config import TRAINING_CONFIG
     from ..utils.checkpoint import CheckpointManager
     from ..modules.training_logger import get_logger
 
@@ -380,13 +383,19 @@ class HFDatasetTrainer:
                  brain: VectLLMBrain,
                  dataset_loader: HFDatasetLoader,
                  stats_collector: Optional[StatsCollector] = None,
-                 checkpoint_manager: Optional[CheckpointManager] = None):
+                 checkpoint_manager: Optional[CheckpointManager] = None,
+                 validation_split: float = None,
+                 validation_frequency: int = None,
+                 early_stopping_patience: int = None):
         """
         Args:
             brain: Istanza VectLLMBrain
             dataset_loader: HFDatasetLoader
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
+            validation_split: Fraction of data to use for validation (default from config)
+            validation_frequency: Validate every N samples (default from config)
+            early_stopping_patience: Stop after N validations without improvement (default from config)
         """
         self.brain = brain
         self.loader = dataset_loader
@@ -394,12 +403,90 @@ class HFDatasetTrainer:
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
         self.logger = get_logger()
 
+        # Validation settings
+        self.validation_split = validation_split or TRAINING_CONFIG.VALIDATION_SPLIT
+        self.validation_frequency = validation_frequency or TRAINING_CONFIG.VALIDATION_FREQUENCY
+        self.early_stopping_patience = early_stopping_patience or TRAINING_CONFIG.EARLY_STOPPING_PATIENCE
+
+        # Validation state
+        self.train_samples: List[str] = []
+        self.val_samples: List[str] = []
+        self.best_val_loss = float('inf')
+        self.validations_without_improvement = 0
+
+        # Split data
+        self._split_data()
+
+    def _split_data(self):
+        """Split samples into train/validation sets."""
+        all_samples = list(self.loader.samples)
+
+        if len(all_samples) < TRAINING_CONFIG.MIN_VALIDATION_SAMPLES:
+            # Not enough samples for validation
+            self.train_samples = all_samples
+            self.val_samples = []
+            self.logger.info(f"Not enough samples for validation ({len(all_samples)} < {TRAINING_CONFIG.MIN_VALIDATION_SAMPLES})")
+            return
+
+        # Shuffle for random split
+        random.shuffle(all_samples)
+
+        # Split
+        val_size = int(len(all_samples) * self.validation_split)
+        val_size = max(val_size, 1)  # At least 1 validation sample
+
+        self.val_samples = all_samples[:val_size]
+        self.train_samples = all_samples[val_size:]
+
+        self.logger.info(f"Data split: {len(self.train_samples)} train, {len(self.val_samples)} validation")
+
+    def _run_validation(self) -> float:
+        """
+        Run validation on validation set.
+
+        Returns:
+            Average validation loss
+        """
+        if not self.val_samples:
+            return -1.0
+
+        total_loss = 0.0
+        count = 0
+
+        for sample in self.val_samples:
+            loss = self.brain.validate_on_text(sample)
+            if loss >= 0:
+                total_loss += loss
+                count += 1
+
+        if count == 0:
+            return -1.0
+
+        avg_loss = total_loss / count
+
+        # Update stats
+        self.stats.metrics.validation_loss = avg_loss
+        self.stats.metrics.validation_history.append((time.time(), avg_loss))
+
+        # Check for improvement
+        if avg_loss < self.best_val_loss:
+            self.best_val_loss = avg_loss
+            self.stats.metrics.best_validation_loss = avg_loss
+            self.validations_without_improvement = 0
+        else:
+            self.validations_without_improvement += 1
+            self.stats.metrics.validations_without_improvement = self.validations_without_improvement
+
+        return avg_loss
+
     def train(self,
               passes: int = 1,
               auto_save_every: int = 1000,
               verbose: bool = True,
               use_pipeline: bool = True,
-              prefetch_size: int = 3) -> Dict:
+              prefetch_size: int = 3,
+              enable_validation: bool = True,
+              enable_early_stopping: bool = True) -> Dict:
         """
         Train on HuggingFace dataset.
 
@@ -409,25 +496,31 @@ class HFDatasetTrainer:
             verbose: Print progress
             use_pipeline: Use pipelined training for CPU/GPU overlap
             prefetch_size: Number of batches to prefetch (if use_pipeline)
+            enable_validation: Run validation during training
+            enable_early_stopping: Stop if validation doesn't improve
 
         Returns:
             Final statistics
         """
         dataset_stats = self.loader.get_stats()
+        train_samples_count = len(self.train_samples)
 
         if verbose:
             self.logger.training_start(
                 "HuggingFace Dataset",
-                samples=dataset_stats['num_samples'],
+                samples=train_samples_count,
+                validation_samples=len(self.val_samples),
                 format=dataset_stats['format'],
                 avg_length=f"{dataset_stats['avg_sample_length']:.0f} chars",
                 passes=passes,
-                pipeline='enabled' if use_pipeline else 'disabled'
+                pipeline='enabled' if use_pipeline else 'disabled',
+                validation='enabled' if enable_validation and self.val_samples else 'disabled'
             )
 
         total_tokens = 0
         samples_processed = 0
         start_time = time.time()
+        early_stopped = False
 
         try:
             for pass_num in range(1, passes + 1):
@@ -440,13 +533,22 @@ class HFDatasetTrainer:
                 if use_pipeline:
                     # Pipelined training - overlap CPU encoding with GPU training
                     pass_tokens = self._train_pass_pipelined(
-                        pass_num, dataset_stats, auto_save_every, verbose, prefetch_size
+                        pass_num, train_samples_count, auto_save_every, verbose, prefetch_size,
+                        enable_validation, enable_early_stopping
                     )
                     if pass_num == 1:
-                        samples_processed = dataset_stats['num_samples']
+                        samples_processed = train_samples_count
+
+                    # Check early stopping
+                    if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
+                        if verbose:
+                            self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                        early_stopped = True
+                        total_tokens += pass_tokens
+                        break
                 else:
                     # Sequential training (legacy)
-                    for idx, text in self.loader.iter_samples():
+                    for idx, text in enumerate(self.train_samples):
                         # Train on sample
                         processed = self.brain.train_on_text(text, passes=1)
                         pass_tokens += processed
@@ -459,9 +561,22 @@ class HFDatasetTrainer:
                         if verbose and (idx + 1) % 100 == 0:
                             brain_stats = self.brain.get_stats()
                             self.logger.sample_progress(
-                                idx + 1, dataset_stats['num_samples'],
+                                idx + 1, train_samples_count,
                                 pass_tokens, brain_stats['loss']
                             )
+
+                        # Validation check
+                        if enable_validation and self.val_samples and (idx + 1) % self.validation_frequency == 0:
+                            val_loss = self._run_validation()
+                            if verbose:
+                                self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
+
+                            # Early stopping check
+                            if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
+                                if verbose:
+                                    self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                                early_stopped = True
+                                break
 
                         # Auto-save
                         if (idx + 1) % auto_save_every == 0:
@@ -480,10 +595,16 @@ class HFDatasetTrainer:
                             vocab_size=brain_stats['vocab_words']
                         )
 
+                    if early_stopped:
+                        break
+
                 total_tokens += pass_tokens
                 pass_time = time.time() - pass_start
                 if verbose:
                     self.logger.pass_end(pass_num, pass_tokens, pass_time)
+
+                if early_stopped:
+                    break
 
         except KeyboardInterrupt:
             self.logger.interrupted()
@@ -492,32 +613,48 @@ class HFDatasetTrainer:
         elapsed = time.time() - start_time
         final_stats = self.stats.get_summary()
 
+        # Add validation stats
+        final_stats['validation_loss'] = self.stats.metrics.validation_loss
+        final_stats['best_validation_loss'] = self.best_val_loss
+        final_stats['early_stopped'] = early_stopped
+
         if verbose:
-            self.logger.training_end(
-                samples=samples_processed,
-                tokens=total_tokens,
-                speed=total_tokens/elapsed if elapsed > 0 else 0,
-                loss=final_stats['loss'],
-                vocab=final_stats['vocab_size']
-            )
+            end_kwargs = {
+                'samples': samples_processed,
+                'tokens': total_tokens,
+                'speed': total_tokens/elapsed if elapsed > 0 else 0,
+                'loss': final_stats['loss'],
+                'vocab': final_stats['vocab_size']
+            }
+            if self.val_samples:
+                end_kwargs['validation_loss'] = self.stats.metrics.validation_loss
+                end_kwargs['best_val_loss'] = self.best_val_loss
+            if early_stopped:
+                end_kwargs['status'] = 'early_stopped'
+
+            self.logger.training_end(**end_kwargs)
 
         return final_stats
 
     def _train_pass_pipelined(self,
                                pass_num: int,
-                               dataset_stats: Dict,
+                               train_samples_count: int,
                                auto_save_every: int,
                                verbose: bool,
-                               prefetch_size: int) -> int:
+                               prefetch_size: int,
+                               enable_validation: bool = True,
+                               enable_early_stopping: bool = True) -> int:
         """
         Train one pass using pipelined CPU/GPU overlap.
 
         Args:
             pass_num: Current pass number
-            dataset_stats: Dataset statistics
+            train_samples_count: Number of training samples
             auto_save_every: Auto-save interval
             verbose: Verbose output
             prefetch_size: Prefetch queue size
+            enable_validation: Run validation during training
+            enable_early_stopping: Stop if validation doesn't improve
 
         Returns:
             Tokens processed in this pass
@@ -525,8 +662,8 @@ class HFDatasetTrainer:
         # Create pipelined trainer
         trainer = PipelinedTrainer(self.brain, prefetch_size=prefetch_size)
 
-        # Collect all samples
-        texts = [text for _, text in self.loader.iter_samples()]
+        # Use train samples only
+        texts = self.train_samples
 
         if not texts:
             return 0
@@ -544,9 +681,15 @@ class HFDatasetTrainer:
             if verbose and idx % 100 == 0:
                 brain_stats = self.brain.get_stats()
                 self.logger.sample_progress(
-                    idx, dataset_stats['num_samples'],
+                    idx, train_samples_count,
                     tokens, brain_stats['loss']
                 )
+
+            # Validation check
+            if enable_validation and self.val_samples and idx % self.validation_frequency == 0:
+                val_loss = self._run_validation()
+                if verbose:
+                    self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
 
             # Auto-save check
             if idx % auto_save_every == 0 and idx > last_save_idx[0]:
@@ -582,18 +725,24 @@ class HFDatasetTrainer:
 
 class DatasetTrainer:
     """Training su dataset con progress tracking"""
-    
+
     def __init__(self,
                  brain: VectLLMBrain,
                  dataset_loader: DatasetLoader,
                  stats_collector: Optional[StatsCollector] = None,
-                 checkpoint_manager: Optional[CheckpointManager] = None):
+                 checkpoint_manager: Optional[CheckpointManager] = None,
+                 validation_split: float = None,
+                 validation_frequency: int = None,
+                 early_stopping_patience: int = None):
         """
         Args:
             brain: Istanza VectLLMBrain
             dataset_loader: Loader dataset
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
+            validation_split: Fraction of data to use for validation
+            validation_frequency: Validate every N files
+            early_stopping_patience: Stop after N validations without improvement
         """
         self.brain = brain
         self.loader = dataset_loader
@@ -601,97 +750,221 @@ class DatasetTrainer:
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
         self.logger = get_logger()
 
+        # Validation settings
+        self.validation_split = validation_split or TRAINING_CONFIG.VALIDATION_SPLIT
+        self.validation_frequency = validation_frequency or TRAINING_CONFIG.VALIDATION_FREQUENCY
+        self.early_stopping_patience = early_stopping_patience or TRAINING_CONFIG.EARLY_STOPPING_PATIENCE
+
+        # Validation state
+        self.train_files: List[Path] = []
+        self.val_files: List[Path] = []
+        self.best_val_loss = float('inf')
+        self.validations_without_improvement = 0
+
+        # Split files
+        self._split_files()
+
+    def _split_files(self):
+        """Split files into train/validation sets."""
+        all_files = list(self.loader.files)
+
+        if len(all_files) < TRAINING_CONFIG.MIN_VALIDATION_SAMPLES:
+            # Not enough files for validation
+            self.train_files = all_files
+            self.val_files = []
+            self.logger.info(f"Not enough files for validation ({len(all_files)} < {TRAINING_CONFIG.MIN_VALIDATION_SAMPLES})")
+            return
+
+        # Shuffle for random split
+        random.shuffle(all_files)
+
+        # Split
+        val_size = int(len(all_files) * self.validation_split)
+        val_size = max(val_size, 1)  # At least 1 validation file
+
+        self.val_files = all_files[:val_size]
+        self.train_files = all_files[val_size:]
+
+        self.logger.info(f"Data split: {len(self.train_files)} train files, {len(self.val_files)} validation files")
+
+    def _run_validation(self) -> float:
+        """
+        Run validation on validation files.
+
+        Returns:
+            Average validation loss
+        """
+        if not self.val_files:
+            return -1.0
+
+        total_loss = 0.0
+        count = 0
+
+        for filepath in self.val_files:
+            content = self.loader.load_file(filepath)
+            if content:
+                loss = self.brain.validate_on_text(content)
+                if loss >= 0:
+                    total_loss += loss
+                    count += 1
+
+        if count == 0:
+            return -1.0
+
+        avg_loss = total_loss / count
+
+        # Update stats
+        self.stats.metrics.validation_loss = avg_loss
+        self.stats.metrics.validation_history.append((time.time(), avg_loss))
+
+        # Check for improvement
+        if avg_loss < self.best_val_loss:
+            self.best_val_loss = avg_loss
+            self.stats.metrics.best_validation_loss = avg_loss
+            self.validations_without_improvement = 0
+        else:
+            self.validations_without_improvement += 1
+            self.stats.metrics.validations_without_improvement = self.validations_without_improvement
+
+        return avg_loss
+
     def train(self,
               passes: int = 1,
               auto_save_every: Optional[int] = None,
               skip_files: int = 0,
-              verbose: bool = True) -> dict:
+              verbose: bool = True,
+              enable_validation: bool = True,
+              enable_early_stopping: bool = True) -> dict:
         """
         Train su intero dataset.
-        
+
         Args:
             passes: Numero di passate sul dataset
             auto_save_every: Auto-save ogni N file
             skip_files: Salta primi N file (per resume)
             verbose: Stampa progress
-            
+            enable_validation: Run validation during training
+            enable_early_stopping: Stop if validation doesn't improve
+
         Returns:
             Dict con statistiche finali
         """
         dataset_stats = self.loader.get_stats()
-        
+        train_files_count = len(self.train_files)
+
         if verbose:
             self.logger.training_start(
                 "Dataset",
-                files=dataset_stats['num_files'],
+                files=train_files_count,
+                validation_files=len(self.val_files),
                 size=f"{dataset_stats['total_size_mb']:.1f} MB",
                 passes=passes,
-                auto_save=f"every {auto_save_every} files" if auto_save_every else "disabled"
+                auto_save=f"every {auto_save_every} files" if auto_save_every else "disabled",
+                validation='enabled' if enable_validation and self.val_files else 'disabled'
             )
-        
+
         total_tokens = 0
         files_processed = 0
-        
-        for pass_num in range(1, passes + 1):
-            if verbose:
-                self.logger.pass_start(pass_num, passes)
-            
-            pass_start = time.time()
-            
-            for file_idx, (filepath, content) in enumerate(self.loader.iter_files(), 1):
-                # Skip if resuming
-                if pass_num == 1 and file_idx <= skip_files:
-                    continue
-                
-                if verbose:
-                    self.logger.file_start(file_idx, dataset_stats['num_files'], filepath.name, len(content))
-                
-                # Train on file
-                file_start = time.time()
-                processed = self.brain.train_on_text(content, passes=1)
-                file_time = time.time() - file_start
-                
-                total_tokens += processed
-                files_processed += 1
-                
-                # Update stats
-                brain_stats = self.brain.get_stats()
-                self.stats.update(
-                    cycles=brain_stats['cycles'],
-                    tokens=brain_stats['tokens'],
-                    loss=brain_stats['loss'],
-                    vocab_size=brain_stats['vocab_words']
-                )
-                
-                if verbose:
-                    self.logger.file_end(processed, file_time, brain_stats['loss'], brain_stats['vocab_words'])
+        start_time = time.time()
+        early_stopped = False
 
-                # Auto-save
-                if auto_save_every and file_idx % auto_save_every == 0:
-                    ckpt_name = f"dataset_pass{pass_num}_file{file_idx}.ckpt"
-                    ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
+        try:
+            for pass_num in range(1, passes + 1):
+                if verbose:
+                    self.logger.pass_start(pass_num, passes)
+
+                pass_start = time.time()
+
+                for file_idx, filepath in enumerate(self.train_files, 1):
+                    # Skip if resuming
+                    if pass_num == 1 and file_idx <= skip_files:
+                        continue
+
+                    content = self.loader.load_file(filepath)
+                    if not content:
+                        continue
 
                     if verbose:
-                        self.logger.checkpoint_save(ckpt_name)
+                        self.logger.file_start(file_idx, train_files_count, filepath.name, len(content))
 
-                    self.brain.save_checkpoint(str(ckpt_path))
-            
-            pass_time = time.time() - pass_start
+                    # Train on file
+                    file_start = time.time()
+                    processed = self.brain.train_on_text(content, passes=1)
+                    file_time = time.time() - file_start
 
-            if verbose:
-                self.logger.pass_end(pass_num, total_tokens, pass_time)
-        
+                    total_tokens += processed
+                    files_processed += 1
+
+                    # Update stats
+                    brain_stats = self.brain.get_stats()
+                    self.stats.update(
+                        cycles=brain_stats['cycles'],
+                        tokens=brain_stats['tokens'],
+                        loss=brain_stats['loss'],
+                        vocab_size=brain_stats['vocab_words']
+                    )
+
+                    if verbose:
+                        self.logger.file_end(processed, file_time, brain_stats['loss'], brain_stats['vocab_words'])
+
+                    # Validation check
+                    if enable_validation and self.val_files and file_idx % self.validation_frequency == 0:
+                        val_loss = self._run_validation()
+                        if verbose:
+                            self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
+
+                        # Early stopping check
+                        if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
+                            if verbose:
+                                self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                            early_stopped = True
+                            break
+
+                    # Auto-save
+                    if auto_save_every and file_idx % auto_save_every == 0:
+                        ckpt_name = f"dataset_pass{pass_num}_file{file_idx}.ckpt"
+                        ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
+
+                        if verbose:
+                            self.logger.checkpoint_save(ckpt_name)
+
+                        self.brain.save_checkpoint(str(ckpt_path))
+
+                if early_stopped:
+                    break
+
+                pass_time = time.time() - pass_start
+
+                if verbose:
+                    self.logger.pass_end(pass_num, total_tokens, pass_time)
+
+        except KeyboardInterrupt:
+            self.logger.interrupted()
+
         # Final stats
+        elapsed = time.time() - start_time
         final_stats = self.stats.get_summary()
-        
+
+        # Add validation stats
+        final_stats['validation_loss'] = self.stats.metrics.validation_loss
+        final_stats['best_validation_loss'] = self.best_val_loss
+        final_stats['early_stopped'] = early_stopped
+
         if verbose:
-            self.logger.training_end(
-                files=files_processed,
-                tokens=total_tokens,
-                loss=final_stats['loss'],
-                vocab=final_stats['vocab_size']
-            )
-        
+            end_kwargs = {
+                'files': files_processed,
+                'tokens': total_tokens,
+                'loss': final_stats['loss'],
+                'vocab': final_stats['vocab_size']
+            }
+            if self.val_files:
+                end_kwargs['validation_loss'] = self.stats.metrics.validation_loss
+                end_kwargs['best_val_loss'] = self.best_val_loss
+            if early_stopped:
+                end_kwargs['status'] = 'early_stopped'
+
+            self.logger.training_end(**end_kwargs)
+
         return final_stats
 
 

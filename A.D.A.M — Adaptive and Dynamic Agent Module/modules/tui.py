@@ -44,6 +44,11 @@ class ADAMTUI:
             'max_articles': 0,
             'dataset_path': '',
             'extensions': '.txt,.md',
+            # Validation settings
+            'enable_validation': True,
+            'validation_split': 0.1,
+            'validation_articles': 10,
+            'early_stopping': True,
         }
 
         # Menu definitions
@@ -69,6 +74,8 @@ class ADAMTUI:
                     ('checkpoint', '📦 Load Checkpoint', 'Resume from checkpoint'),
                     ('passes', '🔄 Passes', 'Number of training passes'),
                     ('preset', '⚡ Preset', 'Configuration preset'),
+                    ('validation', '✓ Validation', 'Enable validation during training'),
+                    ('early_stop', '🛑 Early Stopping', 'Stop when validation stops improving'),
                     ('run', '▶️  Start Training', 'Begin training'),
                     ('back', '← Back', 'Return to main menu'),
                 ]
@@ -79,10 +86,13 @@ class ADAMTUI:
                     ('language', '🌍 Language', 'Wikipedia language code'),
                     ('batch', '📦 Batch Size', 'Articles per batch'),
                     ('articles', '📝 Max Articles', 'Maximum articles (0=unlimited)'),
+                    ('val_articles', '✓ Validation Articles', 'Articles for validation set'),
                     ('output', '💾 Output Checkpoint', 'Where to save the model'),
                     ('checkpoint', '📦 Load Checkpoint', 'Resume from checkpoint'),
                     ('passes', '🔄 Passes per Batch', 'Training passes per batch'),
                     ('preset', '⚡ Preset', 'Configuration preset'),
+                    ('validation', '✓ Validation', 'Enable validation during training'),
+                    ('early_stop', '🛑 Early Stopping', 'Stop when validation stops improving'),
                     ('run', '▶️  Start Training', 'Begin Wikipedia training'),
                     ('back', '← Back', 'Return to main menu'),
                 ]
@@ -96,6 +106,9 @@ class ADAMTUI:
                     ('passes', '🔄 Passes', 'Number of training passes'),
                     ('preset', '⚡ Preset', 'Configuration preset'),
                     ('extensions', '📄 Extensions', 'File extensions (.txt,.md)'),
+                    ('val_split', '✓ Validation Split', 'Fraction for validation (0.1 = 10%)'),
+                    ('validation', '✓ Validation', 'Enable validation during training'),
+                    ('early_stop', '🛑 Early Stopping', 'Stop when validation stops improving'),
                     ('run', '▶️  Start Training', 'Begin dataset training'),
                     ('back', '← Back', 'Return to main menu'),
                 ]
@@ -160,6 +173,10 @@ class ADAMTUI:
                 'base_lr': TRAINING_CONFIG.BASE_LR,
                 'momentum': TRAINING_CONFIG.MOMENTUM,
                 'temperature': TRAINING_CONFIG.EXPLORATION_TEMPERATURE,
+                'validation_split': TRAINING_CONFIG.VALIDATION_SPLIT,
+                'validation_frequency': TRAINING_CONFIG.VALIDATION_FREQUENCY,
+                'early_stopping_patience': TRAINING_CONFIG.EARLY_STOPPING_PATIENCE,
+                'min_validation_samples': TRAINING_CONFIG.MIN_VALIDATION_SAMPLES,
             },
             'performance': {
                 'gpu_arch': RUNTIME_CONFIG.NVCC_ARCH,
@@ -320,6 +337,14 @@ class ADAMTUI:
             return self.values['dataset_path'] or "(not set)"
         elif key == 'extensions':
             return self.values['extensions']
+        elif key == 'validation':
+            return "enabled" if self.values['enable_validation'] else "disabled"
+        elif key == 'early_stop':
+            return "enabled" if self.values['early_stopping'] else "disabled"
+        elif key == 'val_articles':
+            return str(self.values['validation_articles'])
+        elif key == 'val_split':
+            return f"{self.values['validation_split']:.0%}"
         return ""
 
     def _handle_selection(self, stdscr, key: str):
@@ -431,6 +456,34 @@ class ADAMTUI:
             value = self._input_dialog(stdscr, "Extensions (comma-sep)", self.values['extensions'])
             if value is not None:
                 self.values['extensions'] = value
+
+        # Validation inputs
+        elif key == 'validation':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "Validation", options)
+            if idx >= 0:
+                self.values['enable_validation'] = (idx == 0)
+        elif key == 'early_stop':
+            options = ['enabled', 'disabled']
+            idx = self._select_dialog(stdscr, "Early Stopping", options)
+            if idx >= 0:
+                self.values['early_stopping'] = (idx == 0)
+        elif key == 'val_articles':
+            value = self._input_dialog(stdscr, "Validation Articles", str(self.values['validation_articles']))
+            if value is not None:
+                try:
+                    self.values['validation_articles'] = int(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
+        elif key == 'val_split':
+            value = self._input_dialog(stdscr, "Validation Split (0.1 = 10%)", str(self.values['validation_split']))
+            if value is not None:
+                try:
+                    self.values['validation_split'] = float(value)
+                except ValueError:
+                    self.message = "Invalid number"
+                    self.message_type = "error"
 
         # Run commands
         elif key == 'run':
@@ -650,6 +703,10 @@ class ADAMTUI:
             cmd += f" -c {self.values['checkpoint']}"
         cmd += f" -p {self.values['passes']}"
         cmd += f" --preset {self.values['preset']}"
+        if self.values['enable_validation']:
+            cmd += " --validation"
+        if self.values['early_stopping']:
+            cmd += " --early-stopping"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -674,6 +731,11 @@ class ADAMTUI:
         if self.values['max_articles']:
             cmd += f" --max-articles {self.values['max_articles']}"
         cmd += f" --preset {self.values['preset']}"
+        cmd += f" --val-articles {self.values['validation_articles']}"
+        if self.values['enable_validation']:
+            cmd += " --validation"
+        if self.values['early_stopping']:
+            cmd += " --early-stopping"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -701,6 +763,11 @@ class ADAMTUI:
         cmd += f" --preset {self.values['preset']}"
         if self.values['extensions']:
             cmd += f" --extensions {self.values['extensions']}"
+        cmd += f" --val-split {self.values['validation_split']}"
+        if self.values['enable_validation']:
+            cmd += " --validation"
+        if self.values['early_stopping']:
+            cmd += " --early-stopping"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)

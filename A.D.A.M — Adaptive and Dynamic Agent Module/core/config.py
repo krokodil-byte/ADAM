@@ -57,6 +57,12 @@ class TrainingConfig:
     SELF_LOOP_SLEEP_US: int = 5000  # 5ms → ~200 cycles/sec
     EXTERNAL_INPUT_SLEEP_US: int = 100000  # 100ms
 
+    # Validation settings
+    VALIDATION_SPLIT: float = 0.1  # 10% of data for validation
+    VALIDATION_FREQUENCY: int = 100  # Validate every N batches/samples
+    EARLY_STOPPING_PATIENCE: int = 5  # Stop after N validations without improvement
+    MIN_VALIDATION_SAMPLES: int = 10  # Minimum samples needed for validation
+
 
 @dataclass
 class PerformanceConfig:

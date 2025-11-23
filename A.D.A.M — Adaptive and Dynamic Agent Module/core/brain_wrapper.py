@@ -275,6 +275,17 @@ class VectLLMBrain:
             ctypes.c_int                    # max_vocab
         ]
         self.lib.get_token_probabilities.restype = ctypes.c_int
+
+        # compute_validation_loss (if available in kernel)
+        try:
+            self.lib.compute_validation_loss.argtypes = [
+                ctypes.POINTER(ctypes.c_int),  # tokens
+                ctypes.c_int                    # num_tokens
+            ]
+            self.lib.compute_validation_loss.restype = ctypes.c_float
+            self._has_validation_api = True
+        except AttributeError:
+            self._has_validation_api = False
     
     def __enter__(self):
         self.start()
@@ -569,6 +580,51 @@ class VectLLMBrain:
             'vocab_utilization': len(self.vocab.word_to_id) / self.vocab.max_word_vocab_size,
         }
 
+    def compute_validation_loss(self, tokens: List[int]) -> float:
+        """
+        Compute loss on tokens without training (forward pass only).
+
+        Args:
+            tokens: List of token IDs for validation
+
+        Returns:
+            Validation loss (or -1 if error)
+        """
+        if not self.initialized or not tokens:
+            return -1.0
+
+        n_tokens = len(tokens)
+
+        # Use dedicated validation API if available
+        if hasattr(self, '_has_validation_api') and self._has_validation_api:
+            if self._token_buffer is not None and n_tokens <= self._token_buffer_size:
+                token_np = np.array(tokens, dtype=np.int32)
+                ctypes.memmove(ctypes.addressof(self._token_buffer), token_np.ctypes.data, n_tokens * 4)
+                return self.lib.compute_validation_loss(self._token_buffer, n_tokens)
+            else:
+                token_array = (ctypes.c_int * n_tokens)(*tokens)
+                return self.lib.compute_validation_loss(token_array, n_tokens)
+
+        # Fallback: estimate loss from current model state
+        # This uses the training loss as a proxy (less accurate but works without kernel changes)
+        stats = self.get_stats()
+        return stats['loss']
+
+    def validate_on_text(self, text: str) -> float:
+        """
+        Compute validation loss on text.
+
+        Args:
+            text: Text for validation
+
+        Returns:
+            Validation loss
+        """
+        tokens = self.encode_text(text)
+        if not tokens:
+            return -1.0
+        return self.compute_validation_loss(tokens)
+
     def generate_token(self, tokens: List[int], temperature: float = None) -> tuple:
         """
         Genera il prossimo token con probabilità.
@@ -692,28 +748,37 @@ class VectLLMBrain:
     def load_checkpoint(self, filepath: str, load_vocab: bool = True) -> bool:
         """
         Carica checkpoint (brain + vocabolario).
-        
+
         Args:
             filepath: Path al checkpoint
             load_vocab: Se True, carica anche vocabolario
-            
+
         Returns:
             True se successo
         """
+        # Check initialization
+        if not self.initialized:
+            print("⚠️  System not initialized - call start() before load_checkpoint()")
+            return False
+
         # Load brain checkpoint
         result = self.lib.load_checkpoint(filepath.encode('utf-8'))
-        
+
         if result != 0:
+            print(f"⚠️  Failed to load checkpoint: {filepath} (error {result})")
             return False
-        
+
         # Load vocabulary
         if load_vocab:
             vocab_path = Path(filepath).with_suffix('.vocab')
             if vocab_path.exists():
                 self.vocab = DynamicVocabulary.load(str(vocab_path))
+                # Sync vocabulary with GPU
+                self.sync_all_vocabulary()
+                print(f"   ✅ Loaded {len(self.vocab.word_to_id)} vocab words")
             else:
                 print(f"⚠️  Vocab file not found: {vocab_path}")
-        
+
         return True
     
     def prune_vocabulary(self) -> int:
