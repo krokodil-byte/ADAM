@@ -607,7 +607,7 @@ class WikipediaStreamTrainer:
                 # Check early stopping
                 if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
                     if verbose:
-                        self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                        self.logger.validation_early_stop(self.early_stopping_patience)
                     early_stopped = True
                     break
 
@@ -795,9 +795,13 @@ class WikipediaStreamTrainer:
 
             # Validation check
             if enable_validation and self.val_articles and article_num % self.validation_frequency == 0:
+                if verbose:
+                    self.logger.validation_start(len(self.val_articles))
                 val_loss = self._run_validation()
                 if verbose:
-                    self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
+                    improved = (self.validations_without_improvement == 0)
+                    self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                    self.logger.validation_complete()
 
             # Auto-save check
             if article_num % auto_save_every == 0 and article_num > last_save_article[0]:

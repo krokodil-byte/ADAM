@@ -542,7 +542,7 @@ class HFDatasetTrainer:
                     # Check early stopping
                     if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
                         if verbose:
-                            self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                            self.logger.validation_early_stop(self.early_stopping_patience)
                         early_stopped = True
                         total_tokens += pass_tokens
                         break
@@ -567,14 +567,18 @@ class HFDatasetTrainer:
 
                         # Validation check
                         if enable_validation and self.val_samples and (idx + 1) % self.validation_frequency == 0:
+                            if verbose:
+                                self.logger.validation_start(len(self.val_samples))
                             val_loss = self._run_validation()
                             if verbose:
-                                self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
+                                improved = (self.validations_without_improvement == 0)
+                                self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                                self.logger.validation_complete()
 
                             # Early stopping check
                             if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
                                 if verbose:
-                                    self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                                    self.logger.validation_early_stop(self.early_stopping_patience)
                                 early_stopped = True
                                 break
 
@@ -687,9 +691,13 @@ class HFDatasetTrainer:
 
             # Validation check
             if enable_validation and self.val_samples and idx % self.validation_frequency == 0:
+                if verbose:
+                    self.logger.validation_start(len(self.val_samples))
                 val_loss = self._run_validation()
                 if verbose:
-                    self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
+                    improved = (self.validations_without_improvement == 0)
+                    self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                    self.logger.validation_complete()
 
             # Auto-save check
             if idx % auto_save_every == 0 and idx > last_save_idx[0]:
@@ -909,14 +917,18 @@ class DatasetTrainer:
 
                     # Validation check
                     if enable_validation and self.val_files and file_idx % self.validation_frequency == 0:
+                        if verbose:
+                            self.logger.validation_start(len(self.val_files))
                         val_loss = self._run_validation()
                         if verbose:
-                            self.logger.info(f"  Validation loss: {val_loss:.4f} (best: {self.best_val_loss:.4f})")
+                            improved = (self.validations_without_improvement == 0)
+                            self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                            self.logger.validation_complete()
 
                         # Early stopping check
                         if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
                             if verbose:
-                                self.logger.info(f"Early stopping: no improvement for {self.early_stopping_patience} validations")
+                                self.logger.validation_early_stop(self.early_stopping_patience)
                             early_stopped = True
                             break
 
