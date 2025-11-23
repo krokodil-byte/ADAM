@@ -20,9 +20,39 @@ from .pipeline import AsyncBatchLoader, PipelinedTrainer, BatchData
 import time
 
 
+def detect_gpu_vendor() -> str:
+    """
+    Detect GPU vendor (NVIDIA, AMD, or unknown).
+    Returns vendor name string.
+    """
+    try:
+        # Try nvidia-smi first
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return "NVIDIA"
+    except Exception:
+        pass
+
+    try:
+        # Try rocm-smi for AMD
+        result = subprocess.run(
+            ['rocm-smi', '--showproductname'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return "AMD"
+    except Exception:
+        pass
+
+    return "unknown"
+
+
 class CUDACompiler:
     """Compilatore automatico del kernel CUDA"""
-    
+
     def __init__(self):
         self.cache_dir = RUNTIME_CONFIG.CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +209,65 @@ class VectLLMBrain:
         self._total_sync_time = 0  # Accumulated sync time
         self._sync_count = 0  # Number of syncs performed
 
+        # Cold vocab storage (all words in RAM, unlimited)
+        self._cold_vocab: Dict[int, np.ndarray] = {}  # word_id -> embedding
+        self._cold_vocab_path: Optional[Path] = None  # Path for persistence
+        self._hot_vocab_ids: set = set()  # word_ids currently in GPU
+        self._word_usage_count: Dict[int, int] = {}  # word_id -> usage count
+
+        # GPU vendor detection for optimization paths
+        self._gpu_vendor = detect_gpu_vendor()
+
+        # Pinned memory buffers for faster CPU<->GPU transfers
+        self._pinned_word_ids = None
+        self._pinned_embeddings = None
+        self._pinned_buffer_size = 0
+
+        if PERFORMANCE_CONFIG.USE_PINNED_MEMORY:
+            self._allocate_pinned_buffers()
+
+    def _allocate_pinned_buffers(self, min_words: int = 1000):
+        """
+        Allocate pinned memory buffers for faster CPU<->GPU transfers.
+        Uses numpy arrays with aligned memory for optimal DMA transfers.
+
+        Args:
+            min_words: Minimum buffer size in words
+        """
+        try:
+            embed_dim = MODEL_CONFIG.EMBED_DIM
+
+            # Allocate pinned buffers (page-aligned for DMA)
+            # These will be reused for all batch syncs
+            self._pinned_buffer_size = min_words
+            self._pinned_word_ids = np.zeros(min_words, dtype=np.int32)
+            self._pinned_embeddings = np.zeros(min_words * embed_dim, dtype=np.float32)
+
+            # For AMD with Infinity Cache, ensure 64-byte alignment (cache line)
+            if self._gpu_vendor == "AMD" and VOCAB_OPTIMIZATION_CONFIG.AMD_INFINITY_CACHE:
+                # Reallocate with explicit alignment
+                self._pinned_word_ids = np.require(
+                    self._pinned_word_ids, requirements=['C_CONTIGUOUS', 'ALIGNED']
+                )
+                self._pinned_embeddings = np.require(
+                    self._pinned_embeddings, requirements=['C_CONTIGUOUS', 'ALIGNED']
+                )
+
+        except Exception as e:
+            print(f"⚠️  Failed to allocate pinned buffers: {e}")
+            self._pinned_word_ids = None
+            self._pinned_embeddings = None
+            self._pinned_buffer_size = 0
+
+    def _resize_pinned_buffers(self, num_words: int):
+        """Resize pinned buffers if needed."""
+        if num_words <= self._pinned_buffer_size:
+            return
+
+        # Grow by 2x to avoid frequent reallocations
+        new_size = max(num_words, self._pinned_buffer_size * 2)
+        self._allocate_pinned_buffers(new_size)
+
     def _setup_api(self):
         """Setup function signatures per ctypes"""
         # init_system
@@ -242,7 +331,15 @@ class VectLLMBrain:
             ctypes.POINTER(ctypes.c_float)
         ]
         self.lib.activate_word_token.restype = ctypes.c_int
-        
+
+        # activate_word_tokens_batch (BATCH SYNC)
+        self.lib.activate_word_tokens_batch.argtypes = [
+            ctypes.POINTER(ctypes.c_int),   # word_ids array
+            ctypes.POINTER(ctypes.c_float), # embeddings array
+            ctypes.c_int                     # num_words
+        ]
+        self.lib.activate_word_tokens_batch.restype = ctypes.c_int
+
         # deactivate_word_token
         self.lib.deactivate_word_token.argtypes = [ctypes.c_int]
         self.lib.deactivate_word_token.restype = ctypes.c_int
@@ -409,31 +506,52 @@ class VectLLMBrain:
         # Get cached char embeddings (avoids 256 GPU calls)
         char_embeddings = self._get_char_embeddings_cached()
 
-        # Batch compute embeddings using numpy
-        if VOCAB_OPTIMIZATION_CONFIG.USE_NUMPY_BATCH_OPS:
-            # Prepare batch data
-            word_ids = []
-            init_embeddings = []
+        # Prepare batch data
+        word_ids = []
+        init_embeddings = []
 
-            for word_id, word in new_words:
-                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
-                word_ids.append(word_id)
-                init_embeddings.append(init_emb)
+        for word_id, word in new_words:
+            init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+            word_ids.append(word_id)
+            init_embeddings.append(init_emb)
 
-            # Convert to numpy array for potential batch operations
-            init_embeddings = np.array(init_embeddings, dtype=np.float32)
+        num_words = len(word_ids)
+        embed_dim = MODEL_CONFIG.EMBED_DIM
+
+        # Use pinned buffers if available (faster DMA transfers)
+        if self._pinned_word_ids is not None and PERFORMANCE_CONFIG.USE_PINNED_MEMORY:
+            # Resize if needed
+            self._resize_pinned_buffers(num_words)
+
+            # Copy to pinned buffers (avoids allocation)
+            self._pinned_word_ids[:num_words] = word_ids
+            for i, emb in enumerate(init_embeddings):
+                self._pinned_embeddings[i * embed_dim:(i + 1) * embed_dim] = emb
+
+            # Create ctypes pointers from pinned memory
+            word_ids_ptr = self._pinned_word_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            embeddings_ptr = self._pinned_embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
         else:
-            word_ids = [w[0] for w in new_words]
-            init_embeddings = [self.vocab.get_word_embedding_init(w[1], char_embeddings) for w in new_words]
+            # Fallback: allocate new arrays
+            word_ids_array = np.array(word_ids, dtype=np.int32)
+            embeddings_array = np.array(init_embeddings, dtype=np.float32).flatten()
 
-        # Sync to GPU (still individual calls, but with pre-computed embeddings)
-        activated = 0
-        for i, word_id in enumerate(word_ids):
-            emb = init_embeddings[i] if isinstance(init_embeddings, np.ndarray) else init_embeddings[i]
-            emb_array = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)(*emb)
-            result = self.lib.activate_word_token(word_id, emb_array)
-            if result == 0:
-                activated += 1
+            # Create ctypes pointers
+            word_ids_ptr = word_ids_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            embeddings_ptr = embeddings_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        # Single batch call to GPU (instead of N individual calls)
+        activated = self.lib.activate_word_tokens_batch(
+            word_ids_ptr,
+            embeddings_ptr,
+            len(word_ids)
+        )
+
+        # Store ALL embeddings in cold vocab (unlimited RAM storage)
+        for i, (word_id, word) in enumerate(new_words):
+            self._cold_vocab[word_id] = init_embeddings[i].copy()
+            self._hot_vocab_ids.add(word_id)
+            self._word_usage_count[word_id] = 0
 
         # Track performance
         elapsed = time.time() - start_time
@@ -811,37 +929,46 @@ class VectLLMBrain:
         # Decode generated tokens
         return self.vocab.decode(generated_tokens)
     
-    def save_checkpoint(self, filepath: str, save_vocab: bool = True) -> bool:
+    def save_checkpoint(self, filepath: str, save_vocab: bool = True, save_cold: bool = True) -> bool:
         """
-        Salva checkpoint (brain + vocabolario).
-        
+        Salva checkpoint (brain + vocabolario + cold vocab).
+
         Args:
             filepath: Path al checkpoint (es. "checkpoint.ckpt")
             save_vocab: Se True, salva anche vocabolario
-            
+            save_cold: Se True, salva anche cold vocab embeddings
+
         Returns:
             True se successo
         """
         # Save brain checkpoint
         result = self.lib.save_checkpoint(filepath.encode('utf-8'))
-        
+
         if result != 0:
             return False
-        
+
         # Save vocabulary
         if save_vocab:
             vocab_path = Path(filepath).with_suffix('.vocab')
             self.vocab.save(str(vocab_path))
-        
+
+        # Save cold vocab (all embeddings for persistence)
+        if save_cold and self._cold_vocab:
+            # Update cold vocab with latest GPU embeddings before saving
+            self.update_cold_from_hot()
+            cold_path = Path(filepath).with_suffix('.cold')
+            self.save_cold_vocab(str(cold_path))
+
         return True
     
-    def load_checkpoint(self, filepath: str, load_vocab: bool = True) -> bool:
+    def load_checkpoint(self, filepath: str, load_vocab: bool = True, load_cold: bool = True) -> bool:
         """
-        Carica checkpoint (brain + vocabolario).
+        Carica checkpoint (brain + vocabolario + cold vocab).
 
         Args:
             filepath: Path al checkpoint
             load_vocab: Se True, carica anche vocabolario
+            load_cold: Se True, carica anche cold vocab embeddings
 
         Returns:
             True se successo
@@ -869,16 +996,213 @@ class VectLLMBrain:
             else:
                 print(f"⚠️  Vocab file not found: {vocab_path}")
 
+        # Load cold vocab (all embeddings for persistence)
+        if load_cold:
+            cold_path = Path(filepath).with_suffix('.cold.npz')
+            if cold_path.exists():
+                self.load_cold_vocab(str(cold_path))
+                # Mark loaded words as hot (they're now in GPU from vocab sync)
+                for word_id in self._cold_vocab.keys():
+                    if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
+                        self._hot_vocab_ids.add(word_id)
+            else:
+                # Try without .npz
+                cold_path = Path(filepath).with_suffix('.cold')
+                if cold_path.exists():
+                    self.load_cold_vocab(str(cold_path))
+                    for word_id in self._cold_vocab.keys():
+                        if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
+                            self._hot_vocab_ids.add(word_id)
+
         return True
     
     def prune_vocabulary(self) -> int:
         """
         Pruning del vocabolario (rimuove parole rare).
-        
+
         Returns:
             Numero di parole rimosse
         """
         return self.vocab.prune_rare_words()
+
+    # =========================================================================
+    # HOT/COLD VOCABULARY MANAGEMENT
+    # =========================================================================
+
+    def save_cold_vocab(self, filepath: str) -> bool:
+        """
+        Save cold vocab embeddings to disk for persistence.
+
+        Args:
+            filepath: Path for cold vocab file (e.g., "model.cold")
+
+        Returns:
+            True if successful
+        """
+        if not self._cold_vocab:
+            return True  # Nothing to save
+
+        try:
+            # Save as numpy compressed archive
+            save_dict = {
+                'word_ids': np.array(list(self._cold_vocab.keys()), dtype=np.int32),
+                'embeddings': np.array(list(self._cold_vocab.values()), dtype=np.float32),
+                'usage_counts': np.array([self._word_usage_count.get(k, 0) for k in self._cold_vocab.keys()], dtype=np.int32)
+            }
+            np.savez_compressed(filepath, **save_dict)
+            self._cold_vocab_path = Path(filepath)
+            print(f"   💾 Saved cold vocab: {len(self._cold_vocab)} words")
+            return True
+        except Exception as e:
+            print(f"   ❌ Failed to save cold vocab: {e}")
+            return False
+
+    def load_cold_vocab(self, filepath: str) -> bool:
+        """
+        Load cold vocab embeddings from disk.
+
+        Args:
+            filepath: Path to cold vocab file
+
+        Returns:
+            True if successful
+        """
+        try:
+            path = Path(filepath)
+            if not path.exists():
+                # Try with .npz extension
+                if not path.suffix:
+                    path = path.with_suffix('.npz')
+                if not path.exists():
+                    return False
+
+            data = np.load(str(path))
+            word_ids = data['word_ids']
+            embeddings = data['embeddings']
+            usage_counts = data.get('usage_counts', np.zeros(len(word_ids), dtype=np.int32))
+
+            # Populate cold vocab
+            self._cold_vocab.clear()
+            self._word_usage_count.clear()
+
+            for i, word_id in enumerate(word_ids):
+                self._cold_vocab[int(word_id)] = embeddings[i]
+                self._word_usage_count[int(word_id)] = int(usage_counts[i])
+
+            self._cold_vocab_path = path
+            print(f"   📂 Loaded cold vocab: {len(self._cold_vocab)} words")
+            return True
+        except Exception as e:
+            print(f"   ❌ Failed to load cold vocab: {e}")
+            return False
+
+    def load_from_cold_to_hot(self, word_ids: List[int]) -> int:
+        """
+        Load words from cold vocab to hot (GPU).
+        Used when we need words that are in RAM but not in GPU.
+
+        Args:
+            word_ids: List of word IDs to load to GPU
+
+        Returns:
+            Number of words loaded
+        """
+        if not self.initialized:
+            return 0
+
+        # Filter to words that are in cold but not in hot
+        words_to_load = []
+        embeddings_to_load = []
+
+        for word_id in word_ids:
+            if word_id in self._cold_vocab and word_id not in self._hot_vocab_ids:
+                words_to_load.append(word_id)
+                embeddings_to_load.append(self._cold_vocab[word_id])
+
+        if not words_to_load:
+            return 0
+
+        num_words = len(words_to_load)
+        embed_dim = MODEL_CONFIG.EMBED_DIM
+
+        # Use pinned buffers if available (faster DMA transfers)
+        if self._pinned_word_ids is not None and PERFORMANCE_CONFIG.USE_PINNED_MEMORY:
+            self._resize_pinned_buffers(num_words)
+
+            self._pinned_word_ids[:num_words] = words_to_load
+            for i, emb in enumerate(embeddings_to_load):
+                self._pinned_embeddings[i * embed_dim:(i + 1) * embed_dim] = emb
+
+            word_ids_ptr = self._pinned_word_ids.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            embeddings_ptr = self._pinned_embeddings.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        else:
+            word_ids_array = np.array(words_to_load, dtype=np.int32)
+            embeddings_array = np.array(embeddings_to_load, dtype=np.float32).flatten()
+
+            word_ids_ptr = word_ids_array.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
+            embeddings_ptr = embeddings_array.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        activated = self.lib.activate_word_tokens_batch(
+            word_ids_ptr,
+            embeddings_ptr,
+            num_words
+        )
+
+        # Update hot vocab tracking
+        for word_id in words_to_load:
+            self._hot_vocab_ids.add(word_id)
+
+        return activated
+
+    def update_cold_from_hot(self, word_ids: List[int] = None):
+        """
+        Update cold vocab with latest embeddings from GPU (hot).
+        Call this periodically to keep cold vocab in sync.
+
+        Args:
+            word_ids: Specific words to update (None = all hot words)
+        """
+        if not self.initialized:
+            return
+
+        if word_ids is None:
+            word_ids = list(self._hot_vocab_ids)
+
+        embed_dim = MODEL_CONFIG.EMBED_DIM
+        emb_buffer = (ctypes.c_float * embed_dim)()
+
+        updated = 0
+        for word_id in word_ids:
+            if word_id in self._hot_vocab_ids:
+                result = self.lib.get_word_embedding(word_id, emb_buffer)
+                if result == 0:
+                    self._cold_vocab[word_id] = np.array(emb_buffer, dtype=np.float32)
+                    updated += 1
+
+        if updated > 0:
+            print(f"   🔄 Updated {updated} cold embeddings from GPU")
+
+    def get_cold_vocab_stats(self) -> Dict:
+        """Get statistics about hot/cold vocabulary."""
+        return {
+            'cold_vocab_size': len(self._cold_vocab),
+            'hot_vocab_size': len(self._hot_vocab_ids),
+            'total_usage': sum(self._word_usage_count.values()),
+            'cold_vocab_path': str(self._cold_vocab_path) if self._cold_vocab_path else None
+        }
+
+    def increment_word_usage(self, word_ids: List[int]):
+        """
+        Increment usage count for words (for LRU eviction).
+
+        Args:
+            word_ids: List of word IDs that were used
+        """
+        for word_id in word_ids:
+            if word_id in self._word_usage_count:
+                self._word_usage_count[word_id] += 1
+            else:
+                self._word_usage_count[word_id] = 1
 
 
 # ============================================================================

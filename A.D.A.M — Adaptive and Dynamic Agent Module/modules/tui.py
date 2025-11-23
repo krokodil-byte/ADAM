@@ -55,8 +55,6 @@ class ADAMTUI:
             'early_stopping': True,
             # Vocab optimization settings
             'vocab_opt_enabled': True,
-            'max_hot_vocab': 10000,
-            'batch_sync_size': 100,
         }
 
         # Settings data - must be initialized BEFORE _load_settings
@@ -133,9 +131,8 @@ class ADAMTUI:
                     ('model', '🏗️  Model Architecture', 'Layers, dimensions, heads'),
                     ('training', '📈 Training Parameters', 'Learning rate, momentum'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
-                    ('performance', '⚡ Performance', 'GPU optimizations, pipeline, kernels'),
-                    ('vocab_opt', '🔤 Vocab Optimization', 'CPU/GPU hybrid vocab settings'),
-                    ('system', '🖥️  System', 'CUDA, checkpoints'),
+                    ('performance', '⚡ Performance', 'GPU/CUDA optimizations'),
+                    ('vocab_opt', '🔤 Vocab Optimization', 'Enable vocab caching'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
                 ]
@@ -143,9 +140,7 @@ class ADAMTUI:
             'vocab_opt': {
                 'title': 'Vocab Optimization Settings',
                 'items': [
-                    ('enabled', '✓ Enable Optimization', 'Enable vocab optimization pipeline'),
-                    ('max_hot', '🔥 Max Hot Vocab', 'Maximum hot embeddings in GPU'),
-                    ('batch_sync', '📦 Batch Sync Size', 'Words per GPU sync batch'),
+                    ('enabled', '✓ Enable Optimization', 'Enable vocab optimization (caching, batching)'),
                     ('back', '← Back', 'Return to settings'),
                 ]
             },
@@ -201,6 +196,7 @@ class ADAMTUI:
             },
             'performance': {
                 'gpu_arch': RUNTIME_CONFIG.NVCC_ARCH,
+                'device_id': RUNTIME_CONFIG.DEVICE_ID,
                 'use_cublas': PERFORMANCE_CONFIG.USE_CUBLAS,
                 'use_fused': PERFORMANCE_CONFIG.USE_FUSED_KERNELS,
                 'pipeline': PERFORMANCE_CONFIG.PIPELINE_MODE,
@@ -220,10 +216,6 @@ class ADAMTUI:
                 'stop_newline': GENERATION_CONFIG.STOP_ON_NEWLINE,
                 'stop_period': GENERATION_CONFIG.STOP_ON_PERIOD,
             },
-            'system': {
-                'device_id': RUNTIME_CONFIG.DEVICE_ID,
-                'nvcc_arch': RUNTIME_CONFIG.NVCC_ARCH,
-            }
         }
 
     def _load_settings(self):
@@ -427,10 +419,6 @@ class ADAMTUI:
         # Vocab optimization values
         elif key == 'enabled':
             return "enabled" if self.values['vocab_opt_enabled'] else "disabled"
-        elif key == 'max_hot':
-            return str(self.values['max_hot_vocab'])
-        elif key == 'batch_sync':
-            return str(self.values['batch_sync_size'])
         return ""
 
     def _handle_selection(self, stdscr, key: str):
@@ -460,9 +448,6 @@ class ADAMTUI:
             return
         elif key == 'performance':
             self._edit_settings(stdscr, 'performance')
-            return
-        elif key == 'system':
-            self._edit_settings(stdscr, 'system')
             return
         elif key == 'vocab_opt':
             self.current_menu = 'vocab_opt'
@@ -582,22 +567,6 @@ class ADAMTUI:
             idx = self._select_dialog(stdscr, "Vocab Optimization", options)
             if idx >= 0:
                 self.values['vocab_opt_enabled'] = (idx == 0)
-        elif key == 'max_hot':
-            value = self._input_dialog(stdscr, "Max Hot Vocab", str(self.values['max_hot_vocab']))
-            if value is not None:
-                try:
-                    self.values['max_hot_vocab'] = int(value)
-                except ValueError:
-                    self.message = "Invalid number"
-                    self.message_type = "error"
-        elif key == 'batch_sync':
-            value = self._input_dialog(stdscr, "Batch Sync Size", str(self.values['batch_sync_size']))
-            if value is not None:
-                try:
-                    self.values['batch_sync_size'] = int(value)
-                except ValueError:
-                    self.message = "Invalid number"
-                    self.message_type = "error"
 
         # Run commands
         elif key == 'run':
@@ -757,6 +726,7 @@ class ADAMTUI:
 
         # Apply to RUNTIME_CONFIG
         RUNTIME_CONFIG.NVCC_ARCH = perf['gpu_arch']
+        RUNTIME_CONFIG.DEVICE_ID = perf['device_id']
 
         # Apply to PERFORMANCE_CONFIG
         PERFORMANCE_CONFIG.USE_CUBLAS = perf['use_cublas']
@@ -829,10 +799,6 @@ class ADAMTUI:
         # Vocab optimization
         if not self.values['vocab_opt_enabled']:
             cmd += " --no-vocab-opt"
-        if self.values['max_hot_vocab'] != 10000:
-            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
-        if self.values['batch_sync_size'] != 100:
-            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -865,10 +831,6 @@ class ADAMTUI:
         # Vocab optimization
         if not self.values['vocab_opt_enabled']:
             cmd += " --no-vocab-opt"
-        if self.values['max_hot_vocab'] != 10000:
-            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
-        if self.values['batch_sync_size'] != 100:
-            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)
@@ -904,10 +866,6 @@ class ADAMTUI:
         # Vocab optimization
         if not self.values['vocab_opt_enabled']:
             cmd += " --no-vocab-opt"
-        if self.values['max_hot_vocab'] != 10000:
-            cmd += f" --max-hot-vocab {self.values['max_hot_vocab']}"
-        if self.values['batch_sync_size'] != 100:
-            cmd += f" --batch-sync-size {self.values['batch_sync_size']}"
 
         print(f"\n$ {cmd}\n")
         os.system(cmd)

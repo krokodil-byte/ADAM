@@ -38,26 +38,27 @@ class ModelConfig:
 class VocabOptimizationConfig:
     """Configurazione ottimizzazione vocabolario CPU/GPU hybrid"""
 
-    # Feature flag
-    ENABLE_VOCAB_OPTIMIZATION: bool = True  # Master switch for all optimizations
-
-    # Hot/Cold vocab architecture
-    MAX_HOT_VOCAB: int = 10000  # GPU: massimo hot embeddings in VRAM
-    HOT_SELECTION_THRESHOLD: int = 50  # freq minima per essere hot
-    HOT_REFRESH_INTERVAL: int = 100  # batch tra refresh hot vocab
-    RECENCY_DECAY_FACTOR: float = 0.95  # per calcolo recency score
-
-    # Batch sync settings
-    BATCH_SYNC_SIZE: int = 100  # Sync words to GPU in batches of N
-    LAZY_SYNC_THRESHOLD: int = 10  # Sync immediately if pending > N
+    # Master switch
+    ENABLE_VOCAB_OPTIMIZATION: bool = True  # Enable optimized sync path
 
     # Caching
     CACHE_CHAR_EMBEDDINGS: bool = True  # Cache char embeddings from GPU
     CHAR_EMBEDDING_CACHE_TTL: int = 1000  # Refresh cache every N syncs
 
-    # Performance tuning
-    PREALLOCATE_HOT_BUFFER: bool = True  # Pre-allocate GPU buffer for hot vocab
+    # Performance
     USE_NUMPY_BATCH_OPS: bool = True  # Use numpy for batch embedding computation
+    USE_BATCH_SYNC: bool = True  # Use batch GPU sync (single call for N words)
+
+    # Hot/Cold vocab architecture
+    ENABLE_HOT_COLD_VOCAB: bool = False  # Enable hot/cold vocab management
+    MAX_HOT_VOCAB: int = 10000  # Maximum words in GPU (hot vocab)
+    HOT_USAGE_THRESHOLD: int = 5  # Min uses to stay in hot vocab
+    HOT_REFRESH_INTERVAL: int = 1000  # Check hot/cold every N words
+    LRU_EVICTION: bool = True  # Use LRU eviction (vs frequency-based)
+
+    # AMD Infinity Cache / Unified Memory optimization
+    AMD_INFINITY_CACHE: bool = False  # Enable AMD SAM/Infinity Cache path
+    PREFER_UNIFIED_MEMORY: bool = False  # Use CUDA unified memory when available
 
 
 @dataclass
@@ -202,11 +203,7 @@ def get_config_preset(preset_name: str = "default"):
             ),
             "model": ModelConfig(),
             "performance": PerformanceConfig(),
-            "vocab_optimization": VocabOptimizationConfig(
-                MAX_HOT_VOCAB=5000,  # Smaller hot vocab for faster refresh
-                HOT_REFRESH_INTERVAL=50,  # More frequent refresh
-                LAZY_SYNC_THRESHOLD=5,  # Sync sooner
-            ),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         "stable": {
@@ -248,10 +245,7 @@ def get_config_preset(preset_name: str = "default"):
             ),
             "model": ModelConfig(),
             "performance": PerformanceConfig(),
-            "vocab_optimization": VocabOptimizationConfig(
-                MAX_HOT_VOCAB=15000,  # More words for research
-                HOT_REFRESH_INTERVAL=25,  # Frequent refresh for experimentation
-            ),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         # High performance preset
@@ -272,11 +266,7 @@ def get_config_preset(preset_name: str = "default"):
                 USE_WARP_PRIMITIVES=True,
                 GPU_UTILIZATION_TARGET=90,
             ),
-            "vocab_optimization": VocabOptimizationConfig(
-                MAX_HOT_VOCAB=20000,  # Larger hot vocab for performance
-                BATCH_SYNC_SIZE=200,  # Larger batches
-                LAZY_SYNC_THRESHOLD=20,  # Allow more pending before sync
-            ),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         # Memory efficient preset
@@ -293,10 +283,7 @@ def get_config_preset(preset_name: str = "default"):
                 USE_PINNED_MEMORY=False,
                 PREALLOCATE_BUFFERS=False,
             ),
-            "vocab_optimization": VocabOptimizationConfig(
-                MAX_HOT_VOCAB=5000,  # Smaller hot vocab to save VRAM
-                PREALLOCATE_HOT_BUFFER=False,  # Don't pre-allocate
-            ),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         # Maximum throughput
@@ -318,11 +305,7 @@ def get_config_preset(preset_name: str = "default"):
                 USE_WARP_PRIMITIVES=True,
                 GPU_UTILIZATION_TARGET=95,
             ),
-            "vocab_optimization": VocabOptimizationConfig(
-                MAX_HOT_VOCAB=25000,  # Maximum hot vocab
-                BATCH_SYNC_SIZE=500,  # Large batches
-                HOT_REFRESH_INTERVAL=200,  # Less frequent refresh
-            ),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
     }
 
