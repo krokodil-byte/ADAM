@@ -2785,25 +2785,59 @@ int get_word_embedding(int word_id, float* out_embedding) {
 int get_current_word_vocab_size(void) {
     /**
      * Ottieni numero corrente di word tokens attivi.
-     * 
+     *
      * Returns:
      *   Numero di word tokens, -1 se errore
      */
     if (!g_system) {
         return -1;
     }
-    
+
     return g_system->llm.current_word_vocab_size;
+}
+
+// ============================================================================
+// BATCH VOCABULARY SYNC KERNEL (OPTIMIZED)
+// ============================================================================
+
+__global__ void batch_activate_words_kernel(
+    int* word_ids,           // [num_words] - word IDs to activate
+    int num_words,           // number of words to activate
+    int* word_valid_mask,    // [MAX_WORD_VOCAB_SIZE] - output valid mask
+    int* activated_count     // [1] - output count of activated words
+) {
+    /**
+     * Batch activate words by setting their valid mask to 1.
+     * OPTIMIZED: Single kernel call instead of N cudaMemcpy calls.
+     *
+     * Each thread processes one word ID and updates the valid mask.
+     */
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < num_words) {
+        int word_id = word_ids[idx];
+        int word_idx = word_id - CHAR_VOCAB_SIZE;
+
+        // Check bounds
+        if (word_idx >= 0 && word_idx < MAX_WORD_VOCAB_SIZE) {
+            // Atomic write to valid mask (thread-safe)
+            word_valid_mask[word_idx] = 1;
+
+            // Atomic increment of activated count
+            atomicAdd(activated_count, 1);
+        }
+    }
 }
 
 int sync_vocabulary_state(int* word_ids, int num_words) {
     /**
      * Sincronizza stato vocabolario (batch activation).
-     * 
+     * OPTIMIZED: Uses batch kernel instead of N separate cudaMemcpy calls.
+     *
      * Args:
      *   word_ids: Array di word IDs da attivare
      *   num_words: Numero di words
-     * 
+     *
      * Returns:
      *   Numero di words attivate, -1 se errore
      */
@@ -2811,28 +2845,50 @@ int sync_vocabulary_state(int* word_ids, int num_words) {
         fprintf(stderr, "System not initialized\n");
         return -1;
     }
-    
-    int activated = 0;
-    
-    for (int i = 0; i < num_words; i++) {
-        int word_id = word_ids[i];
-        int word_idx = word_id - CHAR_VOCAB_SIZE;
-        
-        if (word_idx >= 0 && word_idx < MAX_WORD_VOCAB_SIZE) {
-            // Set valid mask
-            int valid = 1;
-            cudaMemcpy(
-                g_system->llm.word_valid_mask + word_idx,
-                &valid,
-                sizeof(int),
-                cudaMemcpyHostToDevice
-            );
-            activated++;
-        }
+
+    if (num_words == 0) {
+        return 0;
     }
-    
+
+    // Allocate device memory for word_ids
+    int* d_word_ids;
+    cudaMalloc(&d_word_ids, num_words * sizeof(int));
+
+    // Allocate device memory for activated count
+    int* d_activated_count;
+    cudaMalloc(&d_activated_count, sizeof(int));
+
+    // Initialize activated count to 0
+    cudaMemset(d_activated_count, 0, sizeof(int));
+
+    // Copy word_ids to device (single transfer)
+    cudaMemcpy(d_word_ids, word_ids, num_words * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Launch batch activation kernel
+    int block_size = 256;
+    int grid_size = (num_words + block_size - 1) / block_size;
+
+    batch_activate_words_kernel<<<grid_size, block_size>>>(
+        d_word_ids,
+        num_words,
+        g_system->llm.word_valid_mask,
+        d_activated_count
+    );
+
+    // Wait for kernel to complete
+    cudaDeviceSynchronize();
+
+    // Copy back activated count
+    int activated = 0;
+    cudaMemcpy(&activated, d_activated_count, sizeof(int), cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(d_word_ids);
+    cudaFree(d_activated_count);
+
+    // Update vocab size
     g_system->llm.current_word_vocab_size = activated;
-    
+
     return activated;
 }
 
