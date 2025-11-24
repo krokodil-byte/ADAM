@@ -386,7 +386,8 @@ class HFDatasetTrainer:
                  checkpoint_manager: Optional[CheckpointManager] = None,
                  validation_split: float = None,
                  validation_frequency: int = None,
-                 early_stopping_patience: int = None):
+                 early_stopping_patience: int = None,
+                 validate_per_pass: bool = True):
         """
         Args:
             brain: Istanza VectLLMBrain
@@ -394,8 +395,9 @@ class HFDatasetTrainer:
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
             validation_split: Fraction of data to use for validation (default from config)
-            validation_frequency: Validate every N samples (default from config)
+            validation_frequency: Validate every N samples (only if validate_per_pass=False)
             early_stopping_patience: Stop after N validations without improvement (default from config)
+            validate_per_pass: If True, validate only at end of each pass; if False, validate every N samples
         """
         self.brain = brain
         self.loader = dataset_loader
@@ -407,6 +409,7 @@ class HFDatasetTrainer:
         self.validation_split = validation_split or TRAINING_CONFIG.VALIDATION_SPLIT
         self.validation_frequency = validation_frequency or TRAINING_CONFIG.VALIDATION_FREQUENCY
         self.early_stopping_patience = early_stopping_patience or TRAINING_CONFIG.EARLY_STOPPING_PATIENCE
+        self.validate_per_pass = validate_per_pass
 
         # Validation state
         self.train_samples: List[str] = []
@@ -695,8 +698,10 @@ class HFDatasetTrainer:
                     tokens, brain_stats['loss']
                 )
 
-            # Validation check
-            if enable_validation and self.val_samples and idx % self.validation_frequency == 0:
+            # Validation check (only if validate_per_pass is False)
+            if (enable_validation and self.val_samples and
+                not self.validate_per_pass and
+                idx % self.validation_frequency == 0):
                 if verbose:
                     self.logger.validation_start(len(self.val_samples))
                 val_loss = self._run_validation()
@@ -726,6 +731,16 @@ class HFDatasetTrainer:
         # Run pipelined training
         pass_tokens = trainer.train_texts(iter(texts), progress_callback)
 
+        # Validate at end of pass (if validate_per_pass is True)
+        if enable_validation and self.val_samples and self.validate_per_pass:
+            if verbose:
+                self.logger.validation_start(len(self.val_samples))
+            val_loss = self._run_validation()
+            if verbose:
+                improved = (self.validations_without_improvement == 0)
+                self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                self.logger.validation_complete()
+
         # Get pipeline stats
         pipeline_stats = trainer.get_stats()
         if verbose:
@@ -747,7 +762,8 @@ class DatasetTrainer:
                  checkpoint_manager: Optional[CheckpointManager] = None,
                  validation_split: float = None,
                  validation_frequency: int = None,
-                 early_stopping_patience: int = None):
+                 early_stopping_patience: int = None,
+                 validate_per_pass: bool = True):
         """
         Args:
             brain: Istanza VectLLMBrain
@@ -755,8 +771,9 @@ class DatasetTrainer:
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
             validation_split: Fraction of data to use for validation
-            validation_frequency: Validate every N files
+            validation_frequency: Validate every N files (only if validate_per_pass=False)
             early_stopping_patience: Stop after N validations without improvement
+            validate_per_pass: If True, validate only at end of each pass; if False, validate every N files
         """
         self.brain = brain
         self.loader = dataset_loader
@@ -768,6 +785,7 @@ class DatasetTrainer:
         self.validation_split = validation_split or TRAINING_CONFIG.VALIDATION_SPLIT
         self.validation_frequency = validation_frequency or TRAINING_CONFIG.VALIDATION_FREQUENCY
         self.early_stopping_patience = early_stopping_patience or TRAINING_CONFIG.EARLY_STOPPING_PATIENCE
+        self.validate_per_pass = validate_per_pass
 
         # Validation state
         self.train_files: List[Path] = []
@@ -927,8 +945,10 @@ class DatasetTrainer:
                     if verbose:
                         self.logger.file_end(processed, file_time, brain_stats['loss'], brain_stats['vocab_words'])
 
-                    # Validation check
-                    if enable_validation and self.val_files and file_idx % self.validation_frequency == 0:
+                    # Validation check (only if validate_per_pass is False)
+                    if (enable_validation and self.val_files and
+                        not self.validate_per_pass and
+                        file_idx % self.validation_frequency == 0):
                         if verbose:
                             self.logger.validation_start(len(self.val_files))
                         val_loss = self._run_validation()
@@ -953,6 +973,22 @@ class DatasetTrainer:
                             self.logger.checkpoint_save(ckpt_name)
 
                         self.brain.save_checkpoint(str(ckpt_path))
+
+                # Validate at end of pass (if validate_per_pass is True)
+                if enable_validation and self.val_files and self.validate_per_pass and not early_stopped:
+                    if verbose:
+                        self.logger.validation_start(len(self.val_files))
+                    val_loss = self._run_validation()
+                    if verbose:
+                        improved = (self.validations_without_improvement == 0)
+                        self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                        self.logger.validation_complete()
+
+                    # Early stopping check
+                    if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
+                        if verbose:
+                            self.logger.validation_early_stop(self.early_stopping_patience)
+                        early_stopped = True
 
                 if early_stopped:
                     break
