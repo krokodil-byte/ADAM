@@ -53,6 +53,7 @@ class ADAMTUI:
             'validation_split': 0.1,
             'validation_articles': 10,
             'early_stopping': True,
+            'validate_per_pass': True,  # True = per pass, False = per N articles
             # Vocab optimization settings
             'vocab_opt_enabled': True,
             # Hot/Cold vocab settings
@@ -112,6 +113,7 @@ class ADAMTUI:
                     ('passes', '🔄 Passes per Batch', 'Training passes per batch'),
                     ('preset', '⚡ Preset', 'Configuration preset'),
                     ('validation', '✓ Validation', 'Enable validation during training'),
+                    ('val_mode', '📊 Validation Mode', 'Validate per pass or per N articles'),
                     ('early_stop', '🛑 Early Stopping', 'Stop when validation stops improving'),
                     ('run', '▶️  Start Training', 'Begin Wikipedia training'),
                     ('back', '← Back', 'Return to main menu'),
@@ -431,6 +433,8 @@ class ADAMTUI:
             return "enabled" if self.values['enable_validation'] else "disabled"
         elif key == 'early_stop':
             return "enabled" if self.values['early_stopping'] else "disabled"
+        elif key == 'val_mode':
+            return "per pass" if self.values['validate_per_pass'] else "per N articles"
         elif key == 'val_articles':
             return str(self.values['validation_articles'])
         elif key == 'val_split':
@@ -577,6 +581,11 @@ class ADAMTUI:
             idx = self._select_dialog(stdscr, "Early Stopping", options)
             if idx >= 0:
                 self.values['early_stopping'] = (idx == 0)
+        elif key == 'val_mode':
+            options = ['per pass', 'per N articles']
+            idx = self._select_dialog(stdscr, "Validation Mode", options)
+            if idx >= 0:
+                self.values['validate_per_pass'] = (idx == 0)
         elif key == 'val_articles':
             value = self._input_dialog(stdscr, "Validation Articles", str(self.values['validation_articles']))
             if value is not None:
@@ -904,6 +913,10 @@ class ADAMTUI:
             cmd += " --validation"
         if self.values['early_stopping']:
             cmd += " --early-stopping"
+        if self.values['validate_per_pass']:
+            cmd += " --validate-per-pass"
+        else:
+            cmd += " --no-validate-per-pass"
         # Vocab optimization
         if not self.values['vocab_opt_enabled']:
             cmd += " --no-vocab-opt"

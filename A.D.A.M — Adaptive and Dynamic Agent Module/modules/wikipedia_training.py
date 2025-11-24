@@ -458,7 +458,8 @@ class WikipediaStreamTrainer:
                  checkpoint_manager: Optional[CheckpointManager] = None,
                  validation_articles: int = None,
                  validation_frequency: int = None,
-                 early_stopping_patience: int = None):
+                 early_stopping_patience: int = None,
+                 validate_per_pass: bool = True):
         """
         Args:
             brain: Istanza VectLLMBrain
@@ -467,8 +468,9 @@ class WikipediaStreamTrainer:
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
             validation_articles: Number of articles to use for validation (default: 10% of batch_size)
-            validation_frequency: Validate every N articles (default from config)
+            validation_frequency: Validate every N articles (only if validate_per_pass=False)
             early_stopping_patience: Stop after N validations without improvement (default from config)
+            validate_per_pass: If True, validate only at end of each pass; if False, validate every N articles
         """
         self.brain = brain
         self.fetcher = WikipediaAPIFetcher(
@@ -483,6 +485,7 @@ class WikipediaStreamTrainer:
         self.validation_articles = validation_articles or max(1, int(batch_size * 0.1))
         self.validation_frequency = validation_frequency or TRAINING_CONFIG.VALIDATION_FREQUENCY
         self.early_stopping_patience = early_stopping_patience or TRAINING_CONFIG.EARLY_STOPPING_PATIENCE
+        self.validate_per_pass = validate_per_pass
 
         # Validation state
         self.val_articles: List[Tuple[str, str]] = []
@@ -799,8 +802,10 @@ class WikipediaStreamTrainer:
                     processed_count[0], title, tokens, stats['loss'], stats['vocab_words']
                 )
 
-            # Validation check
-            if enable_validation and self.val_articles and article_num % self.validation_frequency == 0:
+            # Validation check (only if validate_per_pass is False)
+            if (enable_validation and self.val_articles and
+                not self.validate_per_pass and
+                article_num % self.validation_frequency == 0):
                 if verbose:
                     self.logger.validation_start(len(self.val_articles))
                 val_loss = self._run_validation()
@@ -831,6 +836,16 @@ class WikipediaStreamTrainer:
 
         # Run pipelined training
         batch_tokens = trainer.train_texts(iter(texts), progress_callback)
+
+        # Validate at end of pass (if validate_per_pass is True)
+        if enable_validation and self.val_articles and self.validate_per_pass:
+            if verbose:
+                self.logger.validation_start(len(self.val_articles))
+            val_loss = self._run_validation()
+            if verbose:
+                improved = (self.validations_without_improvement == 0)
+                self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                self.logger.validation_complete()
 
         # Get pipeline stats
         pipeline_stats = trainer.get_stats()
