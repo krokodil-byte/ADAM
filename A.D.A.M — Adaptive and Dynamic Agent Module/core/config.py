@@ -18,12 +18,11 @@ class ModelConfig:
     NUM_LAYERS: int = 6
     MAX_SEQ_LEN: int = 512
 
-    # Vocabolario dinamico (DEPRECATO con hot/cold - sarà rimosso)
+    # Vocabolario dinamico
     CHAR_VOCAB_SIZE: int = 256  # ASCII/UTF-8 base
-    MAX_WORD_VOCAB_SIZE: int = 100000  # DEPRECATO: ora usa MAX_HOT_VOCAB
-    WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze
-    WORD_PRUNING_THRESHOLD: int = 2  # Rimuovi word se freq < N
-    MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char
+    WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze (evita spam)
+    WORD_PRUNING_THRESHOLD: int = 2  # Rimuovi word se freq < N (cleanup cold vocab)
+    MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
 
     # Venn Semantic System
     VENN_CLUSTERS: int = 256
