@@ -792,11 +792,20 @@ class WikipediaStreamTrainer:
         # Progress callback
         processed_count = [0]  # Use list for closure
         last_save_article = [articles_processed]
+        total_batches = len(texts)  # Approximate batches (actual may vary slightly)
 
         def progress_callback(batch_num: int, tokens: int):
             processed_count[0] += 1
-            idx = min(processed_count[0] - 1, len(article_info) - 1)
-            title, article_num = article_info[idx]
+
+            # Map batch to article (handle case where batches > articles)
+            if processed_count[0] <= len(article_info):
+                idx = processed_count[0] - 1
+                title, article_num = article_info[idx]
+            else:
+                # More batches than articles - show batch progress instead
+                idx = len(article_info) - 1
+                _, article_num = article_info[idx]
+                title = f"Batch {processed_count[0]}/{total_batches}"
 
             # Progress update
             if verbose and processed_count[0] % 10 == 0:
@@ -839,6 +848,13 @@ class WikipediaStreamTrainer:
 
         # Run pipelined training
         batch_tokens = trainer.train_texts(iter(texts), progress_callback)
+
+        # Clear pass completion message
+        if verbose:
+            stats = self.brain.get_stats()
+            print(f"\n{'='*70}")
+            print(f"✅ PASS {pass_num} COMPLETE - Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']} words")
+            print(f"{'='*70}\n")
 
         # Validate at end of pass (if validate_per_pass is True)
         if enable_validation and self.val_articles and self.validate_per_pass:
