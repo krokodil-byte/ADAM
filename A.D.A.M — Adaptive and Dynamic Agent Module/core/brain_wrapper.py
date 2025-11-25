@@ -1189,8 +1189,6 @@ class VectLLMBrain:
             vocab_path = Path(filepath).with_suffix('.vocab')
             if vocab_path.exists():
                 self.vocab = DynamicVocabulary.load(str(vocab_path))
-                # Sync vocabulary with GPU
-                self.sync_all_vocabulary()
                 print(f"   ✅ Loaded {len(self.vocab.word_to_id)} vocab words")
             else:
                 print(f"⚠️  Vocab file not found: {vocab_path}")
@@ -1200,18 +1198,17 @@ class VectLLMBrain:
             cold_path = Path(filepath).with_suffix('.cold.npz')
             if cold_path.exists():
                 self.load_cold_vocab(str(cold_path))
-                # Mark loaded words as hot (they're now in GPU from vocab sync)
-                for word_id in self._cold_vocab.keys():
-                    if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
-                        self._hot_vocab_ids.add(word_id)
+                print(f"   ✅ Loaded {len(self._cold_vocab)} cold vocab embeddings")
             else:
                 # Try without .npz
                 cold_path = Path(filepath).with_suffix('.cold')
                 if cold_path.exists():
                     self.load_cold_vocab(str(cold_path))
-                    for word_id in self._cold_vocab.keys():
-                        if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
-                            self._hot_vocab_ids.add(word_id)
+                    print(f"   ✅ Loaded {len(self._cold_vocab)} cold vocab embeddings")
+
+        # Sync loaded vocabulary to GPU (hot vocab)
+        if load_vocab and len(self.vocab.word_to_id) > 0:
+            self._sync_loaded_vocabulary()
 
         return True
     
@@ -1223,6 +1220,44 @@ class VectLLMBrain:
             Numero di parole rimosse
         """
         return self.vocab.prune_rare_words()
+
+    def _sync_loaded_vocabulary(self):
+        """
+        Sync loaded vocabulary to GPU after checkpoint load.
+        Loads words from cold vocab to hot vocab (GPU) using LRU strategy.
+        """
+        print("🔄 Syncing vocabulary to GPU...")
+
+        # Get char embeddings for initialization
+        char_embeddings = np.zeros((MODEL_CONFIG.CHAR_VOCAB_SIZE, MODEL_CONFIG.EMBED_DIM), dtype=np.float32)
+        for char_id in range(MODEL_CONFIG.CHAR_VOCAB_SIZE):
+            emb_buffer = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)()
+            result = self.lib.get_word_embedding(char_id, emb_buffer)
+            if result == 0:
+                char_embeddings[char_id] = np.array(emb_buffer)
+
+        # Get all word tokens (exclude char tokens)
+        all_words = [(word_id, word) for word, word_id in self.vocab.word_to_id.items()
+                     if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE]
+
+        if not all_words:
+            print("   No word tokens to sync")
+            return
+
+        # Sort by usage count (most used first) if available
+        all_words.sort(key=lambda x: self._word_usage_count.get(x[0], 0), reverse=True)
+
+        # Load top N words to hot vocab (GPU cache)
+        max_hot = VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB
+        words_to_hot = all_words[:max_hot]
+
+        print(f"   Loading {len(words_to_hot)} most-used words to hot vocab (GPU)...")
+
+        # Batch load to hot
+        if words_to_hot:
+            self._batch_load_to_hot(words_to_hot, char_embeddings)
+            print(f"   ✅ Synced {len(words_to_hot)} words to GPU")
+            print(f"   📊 Total vocab: {len(all_words)} words ({len(words_to_hot)} hot, {len(all_words) - len(words_to_hot)} cold)")
 
     # =========================================================================
     # HOT/COLD VOCABULARY MANAGEMENT
