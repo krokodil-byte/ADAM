@@ -215,8 +215,9 @@ class VectLLMBrain:
         self._hot_vocab_ids: set = set()  # word_ids currently in GPU
         self._word_usage_count: Dict[int, int] = {}  # word_id -> usage count
 
-        # Deferred sync for validation (avoid GPU contention)
-        self._defer_sync = False
+        # Deferred sync for validation/training (avoid GPU contention)
+        # Use counter to support nested defer contexts
+        self._defer_sync_depth = 0  # 0 = sync immediately, >0 = defer
         self._deferred_old_size = None
         self._deferred_new_size = None
 
@@ -452,8 +453,8 @@ class VectLLMBrain:
 
         # Se vocabolario è cresciuto, sincronizza con kernel
         if new_vocab_size > old_vocab_size:
-            if self._defer_sync:
-                # Queue sync for later (avoid GPU contention during validation)
+            if self._defer_sync_depth > 0:
+                # Queue sync for later (avoid GPU contention during validation/training)
                 if self._deferred_old_size is None:
                     self._deferred_old_size = old_vocab_size
                 self._deferred_new_size = new_vocab_size
@@ -464,43 +465,41 @@ class VectLLMBrain:
 
     def begin_validation(self):
         """Start validation mode - defer GPU syncs to avoid contention."""
-        self._defer_sync = True
-        self._deferred_old_size = None
-        self._deferred_new_size = None
+        self._defer_sync_depth += 1
 
     def end_validation(self):
-        """End validation mode - sync any deferred words."""
-        self._defer_sync = False
+        """End validation mode - sync any deferred words if this was the last defer context."""
+        self._defer_sync_depth = max(0, self._defer_sync_depth - 1)
 
-        # Sync all deferred words in one batch
-        if self._deferred_old_size is not None and self._deferred_new_size is not None:
-            self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
-
-        self._deferred_old_size = None
-        self._deferred_new_size = None
+        # Only sync if we're back to depth 0 (no more defer contexts)
+        if self._defer_sync_depth == 0:
+            if self._deferred_old_size is not None and self._deferred_new_size is not None:
+                self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
+            self._deferred_old_size = None
+            self._deferred_new_size = None
 
     def begin_deferred_sync(self):
         """
         Begin deferred sync mode - batch all vocab syncs.
         Use this to defer syncs during training pass.
+        Supports nested calls (uses reference counting).
         """
-        self._defer_sync = True
-        self._deferred_old_size = None
-        self._deferred_new_size = None
+        self._defer_sync_depth += 1
 
     def end_deferred_sync(self):
         """
         End deferred sync mode - execute batched syncs.
         Call at end of training pass.
+        Only syncs when all deferred contexts have ended.
         """
-        self._defer_sync = False
+        self._defer_sync_depth = max(0, self._defer_sync_depth - 1)
 
-        # Sync all deferred words in one batch
-        if self._deferred_old_size is not None and self._deferred_new_size is not None:
-            self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
-
-        self._deferred_old_size = None
-        self._deferred_new_size = None
+        # Only sync if we're back to depth 0 (no more defer contexts)
+        if self._defer_sync_depth == 0:
+            if self._deferred_old_size is not None and self._deferred_new_size is not None:
+                self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
+            self._deferred_old_size = None
+            self._deferred_new_size = None
 
     def decode_tokens(self, tokens: List[int]) -> str:
         """Decode tokens a text"""
