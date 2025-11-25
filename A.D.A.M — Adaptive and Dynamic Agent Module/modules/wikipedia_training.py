@@ -766,6 +766,9 @@ class WikipediaStreamTrainer:
         Returns:
             Tokens processed in this batch
         """
+        # Begin deferred sync - batch all vocab syncs until end of pass
+        self.brain.begin_deferred_sync()
+
         # Create pipelined trainer
         trainer = PipelinedTrainer(self.brain, prefetch_size=prefetch_size)
 
@@ -846,6 +849,9 @@ class WikipediaStreamTrainer:
                 improved = (self.validations_without_improvement == 0)
                 self.logger.validation_result(val_loss, self.best_val_loss, improved)
                 self.logger.validation_complete()
+
+        # End deferred sync - execute all batched vocab syncs
+        self.brain.end_deferred_sync()
 
         # Get pipeline stats
         pipeline_stats = trainer.get_stats()

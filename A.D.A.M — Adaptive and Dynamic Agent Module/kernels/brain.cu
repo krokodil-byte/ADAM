@@ -13,7 +13,7 @@
 
 #define MAX_SEQ_LEN 512
 #define CHAR_VOCAB_SIZE 256
-#define MAX_WORD_VOCAB_SIZE 100000
+#define MAX_WORD_VOCAB_SIZE 10000  // Aligned with MAX_HOT_VOCAB (hot/cold architecture)
 #define TOTAL_VOCAB_SIZE (CHAR_VOCAB_SIZE + MAX_WORD_VOCAB_SIZE)
 #define EMBED_DIM 768
 #define NUM_HEADS 12

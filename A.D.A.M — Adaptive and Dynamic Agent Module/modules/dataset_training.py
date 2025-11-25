@@ -672,6 +672,9 @@ class HFDatasetTrainer:
         Returns:
             Tokens processed in this pass
         """
+        # Begin deferred sync - batch all vocab syncs until end of pass
+        self.brain.begin_deferred_sync()
+
         # Create pipelined trainer
         trainer = PipelinedTrainer(self.brain, prefetch_size=prefetch_size)
 
@@ -740,6 +743,9 @@ class HFDatasetTrainer:
                 improved = (self.validations_without_improvement == 0)
                 self.logger.validation_result(val_loss, self.best_val_loss, improved)
                 self.logger.validation_complete()
+
+        # End deferred sync - execute all batched vocab syncs
+        self.brain.end_deferred_sync()
 
         # Get pipeline stats
         pipeline_stats = trainer.get_stats()
@@ -913,6 +919,9 @@ class DatasetTrainer:
 
                 pass_start = time.time()
 
+                # Begin deferred sync - batch all vocab syncs until end of pass
+                self.brain.begin_deferred_sync()
+
                 for file_idx, filepath in enumerate(self.train_files, 1):
                     # Skip if resuming
                     if pass_num == 1 and file_idx <= skip_files:
@@ -989,6 +998,9 @@ class DatasetTrainer:
                         if verbose:
                             self.logger.validation_early_stop(self.early_stopping_patience)
                         early_stopped = True
+
+                # End deferred sync - execute all batched vocab syncs
+                self.brain.end_deferred_sync()
 
                 if early_stopped:
                     break
