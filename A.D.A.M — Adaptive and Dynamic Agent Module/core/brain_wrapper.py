@@ -12,7 +12,7 @@ import hashlib
 import tempfile
 import numpy as np
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from .config import MODEL_CONFIG, TRAINING_CONFIG, RUNTIME_CONFIG, GENERATION_CONFIG, PERFORMANCE_CONFIG, VOCAB_OPTIMIZATION_CONFIG
 from .vocabulary import DynamicVocabulary
