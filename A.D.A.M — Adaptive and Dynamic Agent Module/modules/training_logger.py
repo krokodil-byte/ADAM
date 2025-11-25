@@ -130,7 +130,10 @@ class TrainingLogger:
 
     def pass_start(self, pass_num: int, total_passes: int):
         """Log start of training pass."""
-        self.info(f"--- Pass {pass_num}/{total_passes} ---")
+        if pass_num > 1:
+            self.info(f"--- Pass {pass_num}/{total_passes} (re-training same batch) ---")
+        else:
+            self.info(f"--- Pass {pass_num}/{total_passes} ---")
 
     def pass_end(self, pass_num: int, tokens: int, time_seconds: float):
         """Log end of training pass."""

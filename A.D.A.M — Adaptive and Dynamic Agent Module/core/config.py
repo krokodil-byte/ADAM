@@ -20,14 +20,24 @@ class ModelConfig:
 
     # Vocabolario dinamico
     CHAR_VOCAB_SIZE: int = 256  # ASCII/UTF-8 base
-    MAX_WORD_VOCAB_SIZE: int = 100000  # Massimo numero di word tokens
-    WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze
-    WORD_PRUNING_THRESHOLD: int = 2  # Rimuovi word se freq < N
-    MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char
+    WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze (evita spam)
+    WORD_PRUNING_THRESHOLD: int = 0  # 0 = mai pruning, cold vocab infinito (la RAM è abbondante!)
+    MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
 
     # Venn Semantic System
     VENN_CLUSTERS: int = 256
-    INTERSECTION_THRESHOLD: float = 0.5  # Threshold per connessioni cluster
+
+    # Venn Activation & Propagation
+    VENN_PROPAGATION_FACTOR: float = 0.2  # Quanto le attivazioni si propagano tra cluster vicini (0.0-1.0)
+    VENN_INTERSECTION_THRESHOLD: float = 0.3  # Threshold per considerare cluster "connessi" (0.0-1.0)
+    MAX_PROPAGATED_ACTIVATION: float = 5.0  # Cap massimo per attivazioni propagate
+    VENN_ACTIVATION_TEMPERATURE: float = 1.0  # Temperature per Gaussian activation (più alto = più broad)
+
+    # Venn Membership Weights
+    PRIMARY_MEMBERSHIP_WEIGHT: float = 0.6  # Peso per cluster primario (più vicino)
+    SECONDARY_MEMBERSHIP_WEIGHT: float = 0.4  # Peso per cluster secondario
+
+    # Venn Cluster Updates
     CLUSTER_UPDATE_LR: float = 0.1  # Learning rate per aggiornamento centri cluster
 
     # Episodic Memory
@@ -49,16 +59,31 @@ class VocabOptimizationConfig:
     USE_NUMPY_BATCH_OPS: bool = True  # Use numpy for batch embedding computation
     USE_BATCH_SYNC: bool = True  # Use batch GPU sync (single call for N words)
 
-    # Hot/Cold vocab architecture
-    ENABLE_HOT_COLD_VOCAB: bool = False  # Enable hot/cold vocab management
-    MAX_HOT_VOCAB: int = 10000  # Maximum words in GPU (hot vocab)
-    HOT_USAGE_THRESHOLD: int = 5  # Min uses to stay in hot vocab
-    HOT_REFRESH_INTERVAL: int = 1000  # Check hot/cold every N words
+    # Hot/Cold vocab architecture (SEMPRE ATTIVO ora)
+    MAX_HOT_VOCAB: int = 10000  # Maximum words in GPU (hot vocab cache)
     LRU_EVICTION: bool = True  # Use LRU eviction (vs frequency-based)
 
-    # AMD Infinity Cache / Unified Memory optimization
-    AMD_INFINITY_CACHE: bool = False  # Enable AMD SAM/Infinity Cache path
-    PREFER_UNIFIED_MEMORY: bool = False  # Use CUDA unified memory when available
+    # Deferred Sync (evita GPU contention durante training/validation)
+    ENABLE_DEFERRED_SYNC: bool = True  # Batch vocab syncs fino a fine pass
+    DEFER_DURING_VALIDATION: bool = True  # Defer anche durante validation
+
+    # Pre-loading (carica tokens da cold a hot prima del forward pass)
+    ENABLE_TOKEN_PRELOADING: bool = True  # Pre-carica tokens mancanti in hot
+    PRELOAD_BATCH_SIZE: int = 100  # Max tokens da pre-caricare in un batch
+
+    # Cold vocab persistence
+    SAVE_COLD_VOCAB: bool = True  # Salva cold vocab embeddings su disco
+    COLD_VOCAB_COMPRESSION: bool = True  # Usa compressione (.npz) per cold vocab
+    AUTO_LOAD_COLD: bool = True  # Carica automaticamente cold vocab da checkpoint
+
+    # AMD Smart Access Memory (SAM) - funziona con qualsiasi CPU AMD + GPU
+    ENABLE_AMD_SAM: bool = False  # Enable AMD Smart Access Memory (Resizable BAR)
+
+    # AMD Infinity Cache - richiede combo CPU+GPU AMD specifica
+    ENABLE_AMD_INFINITY_CACHE: bool = False  # Enable AMD Infinity Cache optimization (solo combo AMD)
+
+    # CUDA Unified Memory (experimental)
+    PREFER_UNIFIED_MEMORY: bool = False  # Use CUDA unified memory quando disponibile
 
 
 @dataclass
@@ -67,28 +92,28 @@ class TrainingConfig:
 
     # Learning rates
     BASE_LR: float = 0.0001  # Conservative per training continuo
-    EMBEDDING_LR_SCALE: float = 0.1  # Embeddings al 10% del LR base
+    EMBEDDING_LR_SCALE: float = 0.1  # Char/Word embeddings al 10% del LR base (più lento)
+    OUTPUT_LR_SCALE: float = 1.0  # Output weights al 100% del LR base (normale)
 
     # Momentum
-    MOMENTUM: float = 0.9  # High stability
+    MOMENTUM: float = 0.9  # High stability (0.0-1.0)
 
     # Temperature
-    EXPLORATION_TEMPERATURE: float = 1.0
+    EXPLORATION_TEMPERATURE: float = 1.0  # Temperature per sampling durante self-loop
 
     # Frequenze di update
     VENN_UPDATE_FREQUENCY: int = 100  # Aggiorna clusters ogni N cicli
     STATS_SYNC_FREQUENCY: int = 10  # Sync GPU stats ogni N cicli
-    VOCAB_PRUNING_FREQUENCY: int = 10000  # Pruning vocabolario ogni N cicli
-
-    # Sleep timings (microseconds)
-    SELF_LOOP_SLEEP_US: int = 5000  # 5ms → ~200 cycles/sec
-    EXTERNAL_INPUT_SLEEP_US: int = 100000  # 100ms
 
     # Validation settings
-    VALIDATION_SPLIT: float = 0.1  # 10% of data for validation
-    VALIDATION_FREQUENCY: int = 100  # Validate every N batches/samples
-    EARLY_STOPPING_PATIENCE: int = 5  # Stop after N validations without improvement
-    MIN_VALIDATION_SAMPLES: int = 10  # Minimum samples needed for validation
+    VALIDATION_SPLIT: float = 0.1  # 10% dei dati per validation
+    VALIDATION_FREQUENCY: int = 100  # Valida ogni N batches/samples (se validate_per_pass=False)
+    VALIDATE_PER_PASS: bool = True  # True = valida a fine pass, False = ogni N samples
+    EARLY_STOPPING_PATIENCE: int = 5  # Stop dopo N validations senza improvement
+    MIN_VALIDATION_SAMPLES: int = 10  # Minimo samples per validation
+
+    # Checkpoint settings
+    AUTO_SAVE_FREQUENCY: int = 1000  # Auto-save ogni N articles/samples
 
 
 @dataclass
@@ -217,11 +242,11 @@ def get_config_preset(preset_name: str = "default"):
                 EXPLORATION_TEMPERATURE=0.7,
                 VENN_UPDATE_FREQUENCY=200
             ),
-            "model": ModelConfig(),
-            "performance": PerformanceConfig(),
-            "vocab_optimization": VocabOptimizationConfig(
-                ENABLE_VOCAB_OPTIMIZATION=False,  # No dynamic expansion in stable
+            "model": ModelConfig(
+                WORD_PRUNING_THRESHOLD=2,  # In stable mode, prune rarely used words
             ),
+            "performance": PerformanceConfig(),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         "inference": {
@@ -230,13 +255,16 @@ def get_config_preset(preset_name: str = "default"):
                 MOMENTUM=0.0,
                 EXPLORATION_TEMPERATURE=0.5,
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                WORD_CREATION_THRESHOLD=0,  # No new words during inference
+            ),
             "performance": PerformanceConfig(
                 USE_FUSED_KERNELS=True,
                 PIPELINE_MODE="disabled",  # No training pipeline needed
             ),
             "vocab_optimization": VocabOptimizationConfig(
-                ENABLE_VOCAB_OPTIMIZATION=False,  # No expansion during inference
+                ENABLE_DEFERRED_SYNC=False,  # No training syncs in inference
+                SAVE_COLD_VOCAB=False,  # Don't save during inference
             ),
         },
 

@@ -398,7 +398,26 @@ class VectLLMBrain:
             self._has_validation_api = True
         except AttributeError:
             self._has_validation_api = False
-    
+
+        # VENN CONFIGURATION API
+        # set_venn_config
+        self.lib.set_venn_config.argtypes = [
+            ctypes.c_float,  # propagation_factor
+            ctypes.c_float,  # intersection_threshold
+            ctypes.c_float,  # max_propagated_activation
+            ctypes.c_float,  # activation_temperature
+            ctypes.c_float,  # primary_membership_weight
+            ctypes.c_float,  # secondary_membership_weight
+            ctypes.c_float   # cluster_update_lr
+        ]
+        self.lib.set_venn_config.restype = ctypes.c_int
+
+        # get_venn_config
+        self.lib.get_venn_config.argtypes = [
+            ctypes.POINTER(ctypes.c_float)  # out_config array[7]
+        ]
+        self.lib.get_venn_config.restype = ctypes.c_int
+
     def __enter__(self):
         self.start()
         return self
@@ -415,7 +434,10 @@ class VectLLMBrain:
         result = self.lib.init_system()
         if result != 0:
             raise RuntimeError("Failed to initialize CUDA system")
-        
+
+        # Set Venn configuration from config.py
+        self._configure_venn_system()
+
         self.initialized = True
         print("✅ Brain ready - continuous training active")
         print(f"   Vocab: {len(self.vocab.word_to_id)} words active")
@@ -434,9 +456,40 @@ class VectLLMBrain:
             temperature = TRAINING_CONFIG.EXPLORATION_TEMPERATURE
         if momentum is None:
             momentum = TRAINING_CONFIG.MOMENTUM
-        
+
         self.lib.set_exploration_params(temperature, momentum)
-    
+
+    def _configure_venn_system(self):
+        """Configure Venn semantic system parameters from config.py"""
+        result = self.lib.set_venn_config(
+            MODEL_CONFIG.VENN_PROPAGATION_FACTOR,
+            MODEL_CONFIG.VENN_INTERSECTION_THRESHOLD,
+            MODEL_CONFIG.MAX_PROPAGATED_ACTIVATION,
+            MODEL_CONFIG.VENN_ACTIVATION_TEMPERATURE,
+            MODEL_CONFIG.PRIMARY_MEMBERSHIP_WEIGHT,
+            MODEL_CONFIG.SECONDARY_MEMBERSHIP_WEIGHT,
+            MODEL_CONFIG.CLUSTER_UPDATE_LR
+        )
+        if result != 0:
+            raise RuntimeError("Failed to configure Venn system")
+
+    def get_venn_config(self) -> dict:
+        """Get current Venn configuration (for debugging)"""
+        config_array = (ctypes.c_float * 7)()
+        result = self.lib.get_venn_config(config_array)
+        if result != 0:
+            raise RuntimeError("Failed to get Venn config")
+
+        return {
+            'propagation_factor': config_array[0],
+            'intersection_threshold': config_array[1],
+            'max_propagated_activation': config_array[2],
+            'activation_temperature': config_array[3],
+            'primary_membership_weight': config_array[4],
+            'secondary_membership_weight': config_array[5],
+            'cluster_update_lr': config_array[6]
+        }
+
     def encode_text(self, text: str) -> List[int]:
         """
         Encode text usando vocabolario dinamico.
