@@ -29,14 +29,32 @@ typedef enum {
 } OperationMode;
 
 typedef struct {
+    // Venn activation and propagation parameters
+    float propagation_factor;           // How much activations propagate between similar clusters (0.0-1.0)
+    float intersection_threshold;       // Threshold for considering clusters "connected" (0.0-1.0)
+    float max_propagated_activation;    // Maximum cap for propagated activations
+    float activation_temperature;       // Temperature for Gaussian activation (higher = broader)
+
+    // Venn membership weights
+    float primary_membership_weight;    // Weight for primary (closest) cluster
+    float secondary_membership_weight;  // Weight for secondary cluster
+
+    // Venn cluster updates
+    float cluster_update_lr;            // Learning rate for updating cluster centers
+} VennConfig;
+
+typedef struct {
     float* cluster_centers;
     int* token_memberships;
     float* membership_weights;
     float* intersection_matrix;
-    
+
     // NUOVO: buffer per k-means online
     float* cluster_sums;      // [VENN_CLUSTERS x EMBED_DIM]
     float* cluster_counts;    // [VENN_CLUSTERS]
+
+    // Configuration
+    VennConfig config;
 } VennSemanticSystem;
 
 typedef struct {
@@ -992,42 +1010,45 @@ __global__ void navigate_venn_space_kernel(
     float* cluster_activations,
     int embed_dim,
     int num_clusters,
-    float temperature
+    float temperature,
+    float propagation_factor,
+    float intersection_threshold,
+    float max_propagated_activation
 ) {
     int cluster_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (cluster_id >= num_clusters) return;
-    
+
     // PHASE 1: Compute direct activation from semantic state
     float dist_squared = 0.0f;
     for (int d = 0; d < embed_dim; d++) {
         float diff = semantic_state[d] - cluster_centers[cluster_id * embed_dim + d];
         dist_squared += diff * diff;
     }
-    
+
     // Gaussian activation (higher temperature = broader activation)
     float direct_activation = expf(-dist_squared / (temperature * temperature));
-    
+
     // PHASE 2: Semantic propagation via intersection matrix
     // Clusters that are semantically similar should co-activate
     float propagated_activation = direct_activation;
-    
+
     for (int other_cluster = 0; other_cluster < num_clusters; other_cluster++) {
         if (other_cluster == cluster_id) continue;
-        
+
         // Get intersection strength (cosine similarity between cluster centers)
         float intersection = intersection_matrix[cluster_id * num_clusters + other_cluster];
-        
+
         // If clusters intersect (similar), propagate activation
         // We read the OLD activation (before update) to avoid race conditions
-        if (intersection > 0.3f) {  // Threshold for meaningful intersection
+        if (intersection > intersection_threshold) {  // Configurable threshold
             // Weighted propagation: stronger intersection = more propagation
-            propagated_activation += intersection * direct_activation * 0.2f;
+            propagated_activation += intersection * direct_activation * propagation_factor;
         }
     }
-    
+
     // Cap maximum activation
-    if (propagated_activation > 5.0f) propagated_activation = 5.0f;
-    
+    if (propagated_activation > max_propagated_activation) propagated_activation = max_propagated_activation;
+
     // Write final activation
     cluster_activations[cluster_id] = propagated_activation;
 }
@@ -1523,7 +1544,10 @@ void* background_self_training(void* arg) {
                 system->llm.cluster_activations,
                 EMBED_DIM,
                 VENN_CLUSTERS,
-                system->llm.exploration_temperature
+                system->llm.exploration_temperature,
+                system->venn.config.propagation_factor,
+                system->venn.config.intersection_threshold,
+                system->venn.config.max_propagated_activation
             );
             
             // Sample new tokens from semantic space (WEIGHTED by clusters)
@@ -1720,21 +1744,30 @@ int init_system(void) {
     
     // Initialize Venn cluster centers
     curandGenerateNormal(gen, g_system->venn.cluster_centers, VENN_CLUSTERS * EMBED_DIM, 0.0f, 0.1f);
-    
+
+    // Initialize Venn configuration with defaults (from config.py)
+    g_system->venn.config.propagation_factor = 0.2f;           // VENN_PROPAGATION_FACTOR
+    g_system->venn.config.intersection_threshold = 0.3f;       // VENN_INTERSECTION_THRESHOLD
+    g_system->venn.config.max_propagated_activation = 5.0f;    // MAX_PROPAGATED_ACTIVATION
+    g_system->venn.config.activation_temperature = 1.0f;       // VENN_ACTIVATION_TEMPERATURE
+    g_system->venn.config.primary_membership_weight = 0.6f;    // PRIMARY_MEMBERSHIP_WEIGHT
+    g_system->venn.config.secondary_membership_weight = 0.4f;  // SECONDARY_MEMBERSHIP_WEIGHT
+    g_system->venn.config.cluster_update_lr = 0.1f;            // CLUSTER_UPDATE_LR
+
     curandDestroyGenerator(gen);
-    
+
     // Initialize word_valid_mask (all zeros = no words active yet)
     cudaMemset(g_system->llm.word_valid_mask, 0, MAX_WORD_VOCAB_SIZE * sizeof(int));
     g_system->llm.current_word_vocab_size = 0;
-    
+
     // Initialize token memberships and weights (CHAR_VOCAB_SIZE per Venn)
     int* h_memberships = (int*)malloc(CHAR_VOCAB_SIZE * 2 * sizeof(int));
     float* h_weights = (float*)malloc(CHAR_VOCAB_SIZE * 2 * sizeof(float));
     for (int i = 0; i < CHAR_VOCAB_SIZE; i++) {
         h_memberships[i * 2] = rand() % VENN_CLUSTERS;      // Primary cluster
         h_memberships[i * 2 + 1] = rand() % VENN_CLUSTERS;  // Secondary cluster
-        h_weights[i * 2] = 0.6f;      // Primary weight
-        h_weights[i * 2 + 1] = 0.4f;  // Secondary weight
+        h_weights[i * 2] = g_system->venn.config.primary_membership_weight;    // From config
+        h_weights[i * 2 + 1] = g_system->venn.config.secondary_membership_weight;  // From config
     }
     cudaMemcpy(g_system->venn.token_memberships, h_memberships, 
                CHAR_VOCAB_SIZE * 2 * sizeof(int), cudaMemcpyHostToDevice);
@@ -2890,6 +2923,44 @@ int sync_vocabulary_state(int* word_ids, int num_words) {
     g_system->llm.current_word_vocab_size = activated;
 
     return activated;
+}
+
+// Set Venn system configuration parameters
+int set_venn_config(
+    float propagation_factor,
+    float intersection_threshold,
+    float max_propagated_activation,
+    float activation_temperature,
+    float primary_membership_weight,
+    float secondary_membership_weight,
+    float cluster_update_lr
+) {
+    if (!g_system) return -1;
+
+    g_system->venn.config.propagation_factor = propagation_factor;
+    g_system->venn.config.intersection_threshold = intersection_threshold;
+    g_system->venn.config.max_propagated_activation = max_propagated_activation;
+    g_system->venn.config.activation_temperature = activation_temperature;
+    g_system->venn.config.primary_membership_weight = primary_membership_weight;
+    g_system->venn.config.secondary_membership_weight = secondary_membership_weight;
+    g_system->venn.config.cluster_update_lr = cluster_update_lr;
+
+    return 0;
+}
+
+// Get current Venn config (for debugging/verification)
+int get_venn_config(float* out_config) {
+    if (!g_system || !out_config) return -1;
+
+    out_config[0] = g_system->venn.config.propagation_factor;
+    out_config[1] = g_system->venn.config.intersection_threshold;
+    out_config[2] = g_system->venn.config.max_propagated_activation;
+    out_config[3] = g_system->venn.config.activation_temperature;
+    out_config[4] = g_system->venn.config.primary_membership_weight;
+    out_config[5] = g_system->venn.config.secondary_membership_weight;
+    out_config[6] = g_system->venn.config.cluster_update_lr;
+
+    return 0;
 }
 
 } // extern "C"
