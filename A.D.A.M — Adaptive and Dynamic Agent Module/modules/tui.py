@@ -202,7 +202,7 @@ class ADAMTUI:
                 'embed_dim': MODEL_CONFIG.EMBED_DIM,
                 'num_heads': MODEL_CONFIG.NUM_HEADS,
                 'max_seq_len': MODEL_CONFIG.MAX_SEQ_LEN,
-                'max_word_vocab_size': MODEL_CONFIG.MAX_WORD_VOCAB_SIZE,
+                'max_hot_vocab': VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB,
             },
             'training': {
                 'base_lr': TRAINING_CONFIG.BASE_LR,

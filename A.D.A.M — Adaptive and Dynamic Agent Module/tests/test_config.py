@@ -33,9 +33,9 @@ class TestModelConfig:
         assert config.NUM_LAYERS == 6
         assert config.MAX_SEQ_LEN == 512
         assert config.CHAR_VOCAB_SIZE == 256
-        assert config.MAX_WORD_VOCAB_SIZE == 100000
+        # MAX_WORD_VOCAB_SIZE removed - now in VocabOptimizationConfig.MAX_HOT_VOCAB
         assert config.WORD_CREATION_THRESHOLD == 5
-        assert config.WORD_PRUNING_THRESHOLD == 2
+        assert config.WORD_PRUNING_THRESHOLD == 0  # Updated default (unlimited cold vocab)
         assert config.MAX_WORD_LENGTH == 20
 
     def test_custom_values(self):
