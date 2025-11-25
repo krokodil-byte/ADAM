@@ -317,29 +317,39 @@ def cmd_checkpoint(args):
 def cmd_chat(args):
     """Interactive chat mode"""
     print("💬 Starting interactive chat...")
-    
-    # Load checkpoint if provided
+
+    # Create brain
     brain = VectLLMBrain()
-    
+
+    # Load checkpoint BEFORE starting brain (important!)
     if args.checkpoint:
         ckpt_path = Path(args.checkpoint)
         if not ckpt_path.exists():
             print(f"❌ Checkpoint not found: {ckpt_path}")
             return 1
-        
-    brain.start()
 
-    if args.checkpoint:
-        print(f"   Loading checkpoint: {ckpt_path.name}")
-        brain.load_checkpoint(str(ckpt_path))
-    
+        print(f"📦 Loading checkpoint: {ckpt_path.name}")
+        brain.start()  # Start first to initialize kernel
+
+        success = brain.load_checkpoint(str(ckpt_path))
+        if not success:
+            print(f"❌ Failed to load checkpoint")
+            brain.stop()
+            return 1
+
+        print(f"✅ Checkpoint loaded successfully")
+    else:
+        # No checkpoint - start with fresh brain
+        print("🆕 Starting with fresh brain (no checkpoint)")
+        brain.start()
+
     try:
         # Start chat
         chat = InteractiveChat(brain)
         chat.start()
     finally:
         brain.stop()
-    
+
     return 0
 
 
