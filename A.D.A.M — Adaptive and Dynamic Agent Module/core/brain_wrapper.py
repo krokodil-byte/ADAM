@@ -437,10 +437,18 @@ class VectLLMBrain:
         self.lib.set_exploration_params(temperature, momentum)
     
     def encode_text(self, text: str) -> List[int]:
-        """Encode text usando vocabolario dinamico"""
+        """
+        Encode text usando vocabolario dinamico.
+        NOW with usage tracking for LRU cache management.
+        """
         old_vocab_size = len(self.vocab.word_to_id)
         tokens = self.vocab.encode(text)
         new_vocab_size = len(self.vocab.word_to_id)
+
+        # Track usage for LRU (only for word tokens, not chars)
+        for token_id in tokens:
+            if token_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
+                self._word_usage_count[token_id] = self._word_usage_count.get(token_id, 0) + 1
 
         # Se vocabolario è cresciuto, sincronizza con kernel
         if new_vocab_size > old_vocab_size:
@@ -507,7 +515,14 @@ class VectLLMBrain:
 
     def _sync_new_words(self, old_size: int, new_size: int):
         """
-        Sincronizza nuove parole con il kernel CUDA.
+        Sincronizza nuove parole con strategia COLD-FIRST + LRU.
+
+        NEW ARCHITECTURE:
+        1. Write ALL new words to cold vocab (RAM) immediately
+        2. Initialize embeddings from char embeddings
+        3. Load to hot (GPU) only if space available or evict LRU
+        4. This ensures stable embedding space (no more loss spikes!)
+
         OPTIMIZED: Uses caching, direct word lookup, and batch operations.
         """
         if not self.initialized:
@@ -534,12 +549,109 @@ class VectLLMBrain:
         # Get cached char embeddings (avoids 256 GPU calls)
         char_embeddings = self._get_char_embeddings_cached()
 
+        # STEP 1: Write ALL new words to COLD vocab immediately (stable embedding space)
+        for word_id, word in new_words:
+            if word_id not in self._cold_vocab:
+                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+                self._cold_vocab[word_id] = init_emb.copy()
+                self._word_usage_count[word_id] = 1  # Initial usage
+            else:
+                # Word already in cold, increment usage
+                self._word_usage_count[word_id] += 1
+
+        # STEP 2: Decide which words to load into HOT (LRU cache)
+        words_to_hot = []
+        for word_id, word in new_words:
+            # Check if hot vocab has space
+            hot_vocab_size = len(self._hot_vocab_ids)
+
+            if word_id in self._hot_vocab_ids:
+                # Already in hot, just increment usage
+                continue
+            elif hot_vocab_size < VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB:
+                # Space available, load to hot
+                words_to_hot.append((word_id, word))
+            else:
+                # Hot is full, check if this word is more important than LRU
+                if self._should_load_to_hot(word_id):
+                    # Evict LRU word and load this one
+                    self._evict_lru_word()
+                    words_to_hot.append((word_id, word))
+
+        # STEP 3: Batch load selected words to HOT (GPU)
+        if words_to_hot:
+            self._batch_load_to_hot(words_to_hot, char_embeddings)
+
+        # Track performance
+        elapsed = time.time() - start_time
+        self._total_sync_time += elapsed
+        self._sync_count += 1
+        self._last_sync_time = elapsed
+
+        cold_size = len(self._cold_vocab)
+        hot_size = len(self._hot_vocab_ids)
+        if len(words_to_hot) > 0:
+            avg_time = self._total_sync_time / self._sync_count if self._sync_count > 0 else elapsed
+            print(f"   🔄 Synced {len(new_words)} words in {elapsed*1000:.1f}ms (avg: {avg_time*1000:.1f}ms)")
+            print(f"      Cold: {cold_size}, Hot: {hot_size}/{VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB}")
+
+    def _should_load_to_hot(self, word_id: int) -> bool:
+        """
+        Decide if word should be loaded to hot based on usage.
+
+        Returns True if word usage > minimum hot word usage (LRU eviction candidate)
+        """
+        if not self._hot_vocab_ids:
+            return True
+
+        # Find LRU word (minimum usage)
+        min_usage = min(self._word_usage_count.get(wid, 0) for wid in self._hot_vocab_ids)
+        current_usage = self._word_usage_count.get(word_id, 0)
+
+        return current_usage > min_usage
+
+    def _evict_lru_word(self):
+        """
+        Evict least recently used word from hot vocab (LRU cache eviction).
+        The word remains in cold vocab (RAM).
+        """
+        if not self._hot_vocab_ids:
+            return
+
+        # Find word with minimum usage (LRU)
+        lru_word_id = min(self._hot_vocab_ids,
+                         key=lambda wid: self._word_usage_count.get(wid, 0))
+
+        # Remove from hot set (word still in cold!)
+        self._hot_vocab_ids.discard(lru_word_id)
+
+        # Note: We don't need to update GPU here - just tracking
+        # The GPU slot will be reused by the new word
+
+    def _batch_load_to_hot(self, words_to_load: List[Tuple[int, str]], char_embeddings: np.ndarray):
+        """
+        Batch load words from cold to hot (GPU).
+
+        Args:
+            words_to_load: List of (word_id, word) tuples
+            char_embeddings: Cached char embeddings for initialization
+        """
+        if not words_to_load:
+            return
+
         # Prepare batch data
         word_ids = []
         init_embeddings = []
 
-        for word_id, word in new_words:
-            init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+        for word_id, word in words_to_load:
+            # Get embedding from cold vocab (already initialized)
+            if word_id in self._cold_vocab:
+                init_emb = self._cold_vocab[word_id]
+            else:
+                # Fallback: initialize from char embeddings
+                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+                self._cold_vocab[word_id] = init_emb.copy()
+
             word_ids.append(word_id)
             init_embeddings.append(init_emb)
 
@@ -575,21 +687,9 @@ class VectLLMBrain:
             len(word_ids)
         )
 
-        # Store ALL embeddings in cold vocab (unlimited RAM storage)
-        for i, (word_id, word) in enumerate(new_words):
-            self._cold_vocab[word_id] = init_embeddings[i].copy()
+        # Mark words as hot
+        for word_id, _ in words_to_load:
             self._hot_vocab_ids.add(word_id)
-            self._word_usage_count[word_id] = 0
-
-        # Track performance
-        elapsed = time.time() - start_time
-        self._total_sync_time += elapsed
-        self._sync_count += 1
-        self._last_sync_time = elapsed
-
-        if activated > 0:
-            avg_time = self._total_sync_time / self._sync_count if self._sync_count > 0 else elapsed
-            print(f"   🔄 Synced {activated} words in {elapsed*1000:.1f}ms (avg: {avg_time*1000:.1f}ms)")
 
     def _sync_new_words_legacy(self, old_size: int, new_size: int):
         """Legacy sync method for fallback."""
