@@ -21,7 +21,7 @@ class ModelConfig:
     # Vocabolario dinamico
     CHAR_VOCAB_SIZE: int = 256  # ASCII/UTF-8 base
     WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze (evita spam)
-    WORD_PRUNING_THRESHOLD: int = 2  # Rimuovi word se freq < N (cleanup cold vocab)
+    WORD_PRUNING_THRESHOLD: int = 0  # 0 = mai pruning, cold vocab infinito (la RAM è abbondante!)
     MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
 
     # Venn Semantic System
@@ -242,11 +242,11 @@ def get_config_preset(preset_name: str = "default"):
                 EXPLORATION_TEMPERATURE=0.7,
                 VENN_UPDATE_FREQUENCY=200
             ),
-            "model": ModelConfig(),
-            "performance": PerformanceConfig(),
-            "vocab_optimization": VocabOptimizationConfig(
-                ENABLE_VOCAB_OPTIMIZATION=False,  # No dynamic expansion in stable
+            "model": ModelConfig(
+                WORD_PRUNING_THRESHOLD=2,  # In stable mode, prune rarely used words
             ),
+            "performance": PerformanceConfig(),
+            "vocab_optimization": VocabOptimizationConfig(),
         },
 
         "inference": {
@@ -255,13 +255,16 @@ def get_config_preset(preset_name: str = "default"):
                 MOMENTUM=0.0,
                 EXPLORATION_TEMPERATURE=0.5,
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                WORD_CREATION_THRESHOLD=0,  # No new words during inference
+            ),
             "performance": PerformanceConfig(
                 USE_FUSED_KERNELS=True,
                 PIPELINE_MODE="disabled",  # No training pipeline needed
             ),
             "vocab_optimization": VocabOptimizationConfig(
-                ENABLE_VOCAB_OPTIMIZATION=False,  # No expansion during inference
+                ENABLE_DEFERRED_SYNC=False,  # No training syncs in inference
+                SAVE_COLD_VOCAB=False,  # Don't save during inference
             ),
         },
 
