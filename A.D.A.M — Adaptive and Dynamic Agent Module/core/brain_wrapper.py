@@ -177,7 +177,7 @@ class VectLLMBrain:
             vocab = DynamicVocabulary(
                 embed_dim=MODEL_CONFIG.EMBED_DIM,
                 char_vocab_size=MODEL_CONFIG.CHAR_VOCAB_SIZE,
-                max_word_vocab_size=MODEL_CONFIG.MAX_WORD_VOCAB_SIZE,
+                # max_word_vocab_size uses default (100000) - cold vocab is unlimited anyway
                 creation_threshold=MODEL_CONFIG.WORD_CREATION_THRESHOLD,
                 pruning_threshold=MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
                 max_word_length=MODEL_CONFIG.MAX_WORD_LENGTH
