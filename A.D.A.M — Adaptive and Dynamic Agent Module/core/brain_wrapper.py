@@ -478,7 +478,30 @@ class VectLLMBrain:
 
         self._deferred_old_size = None
         self._deferred_new_size = None
-    
+
+    def begin_deferred_sync(self):
+        """
+        Begin deferred sync mode - batch all vocab syncs.
+        Use this to defer syncs during training pass.
+        """
+        self._defer_sync = True
+        self._deferred_old_size = None
+        self._deferred_new_size = None
+
+    def end_deferred_sync(self):
+        """
+        End deferred sync mode - execute batched syncs.
+        Call at end of training pass.
+        """
+        self._defer_sync = False
+
+        # Sync all deferred words in one batch
+        if self._deferred_old_size is not None and self._deferred_new_size is not None:
+            self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
+
+        self._deferred_old_size = None
+        self._deferred_new_size = None
+
     def decode_tokens(self, tokens: List[int]) -> str:
         """Decode tokens a text"""
         return self.vocab.decode(tokens)
@@ -802,6 +825,50 @@ class VectLLMBrain:
             self._token_buffer = None
             self._token_buffer_size = 0
 
+    def _preload_tokens_to_hot(self, tokens: List[int]):
+        """
+        Pre-load any tokens in batch that are not in hot vocab.
+        CRITICAL: Ensures kernel has access to all tokens before forward pass.
+
+        Args:
+            tokens: List of token IDs that will be used in forward pass
+        """
+        # Filter word tokens only (chars are always available)
+        word_tokens = [t for t in tokens if t >= MODEL_CONFIG.CHAR_VOCAB_SIZE]
+
+        if not word_tokens:
+            return
+
+        # Find tokens that are in cold but not in hot
+        tokens_to_load = []
+        for token_id in set(word_tokens):  # Unique tokens only
+            if token_id in self._cold_vocab and token_id not in self._hot_vocab_ids:
+                # Token exists in cold but not in hot - need to load
+                word = self.vocab.id_to_word.get(token_id, f"<unk_{token_id}>")
+                tokens_to_load.append((token_id, word))
+
+        if not tokens_to_load:
+            return
+
+        # Check if we need to make space in hot
+        hot_vocab_size = len(self._hot_vocab_ids)
+        max_hot = VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB
+
+        # Evict LRU tokens if needed to make space
+        for _ in range(max(0, hot_vocab_size + len(tokens_to_load) - max_hot)):
+            self._evict_lru_word()
+
+        # Batch load from cold to hot
+        # Get char embeddings for initialization (if needed)
+        char_embeddings = np.zeros((MODEL_CONFIG.CHAR_VOCAB_SIZE, MODEL_CONFIG.EMBED_DIM), dtype=np.float32)
+        for char_id in range(MODEL_CONFIG.CHAR_VOCAB_SIZE):
+            emb_buffer = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)()
+            result = self.lib.get_word_embedding(char_id, emb_buffer)
+            if result == 0:
+                char_embeddings[char_id] = np.array(emb_buffer)
+
+        self._batch_load_to_hot(tokens_to_load, char_embeddings)
+
     def feed_training_batch(self, tokens: List[int]) -> int:
         """
         Feed batch di token per training.
@@ -814,6 +881,10 @@ class VectLLMBrain:
         """
         if not tokens:
             return 0
+
+        # PRE-LOAD: Ensure all tokens in batch are in hot vocab before forward pass
+        # This prevents kernel from trying to access tokens that only exist in cold (RAM)
+        self._preload_tokens_to_hot(tokens)
 
         n_tokens = len(tokens)
 
