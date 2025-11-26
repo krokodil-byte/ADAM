@@ -24,8 +24,11 @@ class ModelConfig:
     WORD_PRUNING_THRESHOLD: int = 0  # 0 = mai pruning, cold vocab infinito (la RAM è abbondante!)
     MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
 
-    # Venn Semantic System
-    VENN_CLUSTERS: int = 256
+    # Venn Semantic System - Multi-Head Architecture
+    ENABLE_VENN_MULTIHEAD: bool = True  # Enable Multi-Head Venn (revolutionary!)
+    NUM_VENN_HEADS: int = 12  # Number of Venn heads (matches NUM_HEADS for symmetry)
+    VENN_CLUSTERS_PER_HEAD: int = 256  # Clusters per head (total: NUM_VENN_HEADS × VENN_CLUSTERS_PER_HEAD)
+    VENN_CLUSTERS: int = 256  # Backward compatibility (used only if ENABLE_VENN_MULTIHEAD=False)
 
     # Venn Activation & Propagation
     VENN_PROPAGATION_FACTOR: float = 0.2  # Quanto le attivazioni si propagano tra cluster vicini (0.0-1.0)
