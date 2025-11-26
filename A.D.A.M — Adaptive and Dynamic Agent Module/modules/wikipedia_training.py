@@ -59,17 +59,23 @@ class WikipediaAPIFetcher:
     def __init__(self,
                  language: str = 'en',
                  ram_percentage: float = 30.0,
-                 batch_size: int = 100,
-                 min_article_length: int = 500,
+                 batch_size: Optional[int] = None,
+                 min_article_length: Optional[int] = None,
                  max_article_length: int = 50000):
         """
         Args:
             language: Wikipedia language code (en, it, de, etc.)
             ram_percentage: Target RAM usage percentage for article buffer (legacy, ignored if batch_size > 0)
-            batch_size: Number of articles per batch (default: 100)
-            min_article_length: Minimum article length in chars
+            batch_size: Number of articles per batch (default: from TRAINING_CONFIG)
+            min_article_length: Minimum article length in chars (default: from TRAINING_CONFIG)
             max_article_length: Maximum article length in chars
         """
+        # Use config defaults if not specified
+        if batch_size is None:
+            batch_size = TRAINING_CONFIG.WIKIPEDIA_BATCH_SIZE
+        if min_article_length is None:
+            min_article_length = TRAINING_CONFIG.WIKIPEDIA_MIN_ARTICLE_LENGTH
+
         self.language = language
         self.ram_percentage = ram_percentage
         self.batch_size = batch_size
@@ -105,8 +111,10 @@ class WikipediaAPIFetcher:
             self.logger.warning(f"API error: {e}")
             return {}
 
-    def _get_random_titles(self, count: int = 10) -> List[str]:
+    def _get_random_titles(self, count: Optional[int] = None) -> List[str]:
         """Get random article titles"""
+        if count is None:
+            count = TRAINING_CONFIG.WIKIPEDIA_API_BATCH_SIZE
         params = {
             'action': 'query',
             'list': 'random',
@@ -149,16 +157,18 @@ class WikipediaAPIFetcher:
 
         return text
 
-    def fetch_batch(self, api_batch_size: int = 10) -> int:
+    def fetch_batch(self, api_batch_size: Optional[int] = None) -> int:
         """
         Fetch a batch of articles.
 
         Args:
-            api_batch_size: Number of titles to fetch per API call
+            api_batch_size: Number of titles to fetch per API call (default: from TRAINING_CONFIG)
 
         Returns:
             Number of articles fetched in this batch
         """
+        if api_batch_size is None:
+            api_batch_size = TRAINING_CONFIG.WIKIPEDIA_API_BATCH_SIZE
         fetched = 0
         target_articles = self.batch_size
 
@@ -213,17 +223,20 @@ class WikipediaAPIFetcher:
 
 class WikipediaExtractor:
     """Estrae testo pulito da Wikipedia dump"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  dump_path: str,
-                 min_article_length: int = 100,
+                 min_article_length: Optional[int] = None,
                  max_article_length: int = 100000):
         """
         Args:
             dump_path: Path al dump Wikipedia (XML o JSONL)
-            min_article_length: Lunghezza minima articolo (chars)
+            min_article_length: Lunghezza minima articolo (chars, default: from TRAINING_CONFIG)
             max_article_length: Lunghezza massima articolo (chars)
         """
+        if min_article_length is None:
+            min_article_length = TRAINING_CONFIG.DATASET_MIN_FILE_LENGTH
+
         self.dump_path = Path(dump_path)
         self.min_length = min_article_length
         self.max_length = max_article_length
@@ -369,19 +382,22 @@ class WikipediaTrainer:
     
     def train(self,
               max_articles: Optional[int] = None,
-              auto_save_every: int = 100,
+              auto_save_every: Optional[int] = None,
               verbose: bool = True) -> dict:
         """
         Train su Wikipedia.
-        
+
         Args:
             max_articles: Numero massimo articoli (None = tutti)
-            auto_save_every: Auto-save ogni N articoli
+            auto_save_every: Auto-save ogni N articoli (default: from TRAINING_CONFIG)
             verbose: Stampa progress
             
         Returns:
             Dict con statistiche finali
         """
+        if auto_save_every is None:
+            auto_save_every = TRAINING_CONFIG.AUTO_SAVE_FREQUENCY
+
         if verbose:
             self.logger.training_start(
                 "Wikipedia Dump",
@@ -453,7 +469,7 @@ class WikipediaStreamTrainer:
     def __init__(self,
                  brain: VectLLMBrain,
                  language: str = 'en',
-                 batch_size: int = 100,
+                 batch_size: Optional[int] = None,
                  stats_collector: Optional[StatsCollector] = None,
                  checkpoint_manager: Optional[CheckpointManager] = None,
                  validation_articles: int = None,
@@ -464,7 +480,7 @@ class WikipediaStreamTrainer:
         Args:
             brain: Istanza VectLLMBrain
             language: Wikipedia language code
-            batch_size: Number of articles per batch
+            batch_size: Number of articles per batch (default: from TRAINING_CONFIG)
             stats_collector: Collector statistiche
             checkpoint_manager: Manager checkpoint
             validation_articles: Number of articles to use for validation (default: 10% of batch_size)
@@ -472,6 +488,9 @@ class WikipediaStreamTrainer:
             early_stopping_patience: Stop after N validations without improvement (default from config)
             validate_per_pass: If True, validate only at end of each pass; if False, validate every N articles
         """
+        if batch_size is None:
+            batch_size = TRAINING_CONFIG.WIKIPEDIA_BATCH_SIZE
+
         self.brain = brain
         self.fetcher = WikipediaAPIFetcher(
             language=language,
@@ -557,7 +576,7 @@ class WikipediaStreamTrainer:
     def train(self,
               max_articles: Optional[int] = None,
               passes_per_batch: int = 1,
-              auto_save_every: int = 100,
+              auto_save_every: Optional[int] = None,
               verbose: bool = True,
               use_pipeline: bool = True,
               prefetch_size: int = 3,
@@ -575,7 +594,7 @@ class WikipediaStreamTrainer:
         Args:
             max_articles: Numero massimo articoli totali (None = infinito)
             passes_per_batch: Passate training per ogni batch
-            auto_save_every: Auto-save ogni N articoli
+            auto_save_every: Auto-save ogni N articoli (default: from TRAINING_CONFIG)
             verbose: Stampa progress
             use_pipeline: Usa training pipelinato per overlap CPU/GPU
             prefetch_size: Numero batch da pre-caricare (se use_pipeline)
@@ -585,6 +604,9 @@ class WikipediaStreamTrainer:
         Returns:
             Dict con statistiche finali
         """
+        if auto_save_every is None:
+            auto_save_every = TRAINING_CONFIG.AUTO_SAVE_FREQUENCY
+
         # Fetch validation articles first
         if enable_validation and not self.val_articles:
             self._fetch_validation_articles()

@@ -115,6 +115,14 @@ class TrainingConfig:
     # Checkpoint settings
     AUTO_SAVE_FREQUENCY: int = 1000  # Auto-save ogni N articles/samples
 
+    # Wikipedia training settings
+    WIKIPEDIA_BATCH_SIZE: int = 100  # Articles per batch
+    WIKIPEDIA_MIN_ARTICLE_LENGTH: int = 500  # Minimum article length in chars
+    WIKIPEDIA_API_BATCH_SIZE: int = 10  # Articles per API request
+
+    # Dataset training settings
+    DATASET_MIN_FILE_LENGTH: int = 100  # Minimum file length in chars
+
 
 @dataclass
 class PerformanceConfig:
@@ -143,6 +151,7 @@ class PerformanceConfig:
     # Memory optimization
     USE_PINNED_MEMORY: bool = True  # Use pinned host memory for faster transfers
     PREALLOCATE_BUFFERS: bool = True  # Pre-allocate all buffers at init
+    PINNED_BUFFER_MIN_WORDS: int = 1000  # Minimum pinned buffer size for vocab sync
 
     # Kernel tuning
     BLOCK_SIZE: int = 256  # Default CUDA block size
@@ -150,6 +159,10 @@ class PerformanceConfig:
 
     # Target utilization
     GPU_UTILIZATION_TARGET: int = 80  # Target GPU utilization %
+
+    # Stats collection
+    STATS_WINDOW_SIZE: int = 100  # Rolling window for stats averaging
+    STATS_HISTORY_SIZE: int = 1000  # Number of historical stats to keep
 
 
 @dataclass
