@@ -241,9 +241,13 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.001,
                 MOMENTUM=0.7,
                 EXPLORATION_TEMPERATURE=1.5,
-                VENN_UPDATE_FREQUENCY=50
+                VENN_UPDATE_FREQUENCY=50,
+                WIKIPEDIA_BATCH_SIZE=200,  # Larger batches for faster learning
+                AUTO_SAVE_FREQUENCY=500,  # More frequent saves
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                WORD_CREATION_THRESHOLD=3,  # Accept words faster
+            ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
         },
@@ -286,9 +290,13 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.0005,
                 MOMENTUM=0.8,
                 EXPLORATION_TEMPERATURE=2.0,
-                VENN_UPDATE_FREQUENCY=25
+                VENN_UPDATE_FREQUENCY=25,
+                AUTO_SAVE_FREQUENCY=100,  # Frequent checkpoints for experiments
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                WORD_CREATION_THRESHOLD=2,  # More aggressive word creation
+                VENN_PROPAGATION_FACTOR=0.3,  # Higher semantic propagation
+            ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
         },
