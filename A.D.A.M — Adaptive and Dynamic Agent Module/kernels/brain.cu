@@ -21,6 +21,11 @@
 #define VENN_CLUSTERS 256
 #define EPISODIC_BUFFER_SIZE 1024
 #define DEFAULT_BLOCK_SIZE 256  // CUDA block size for kernel launches
+#define MAX_COLD_VOCAB 100000  // Maximum word_id supported (for slot table)
+
+// Include modular kernel files
+#include "vocabulary.cu"
+#include "venn_system.cu"
 
 typedef enum {
     MODE_EXTERNAL_INPUT = 0,
@@ -156,6 +161,7 @@ typedef struct {
     LLMCore llm;
     VennSemanticSystem venn;
     EpisodicMemory episodic;
+    SlotTable slot_table;  // NEW: word_id → slot mapping for unlimited vocab
     OperationMode current_mode;
     pthread_t background_thread;
     int running;
@@ -1784,7 +1790,12 @@ int init_system(void) {
     cudaMemset(g_system->llm.momentum_char_emb, 0, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
     cudaMemset(g_system->llm.momentum_word_emb, 0, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
     cudaMemset(g_system->llm.momentum_output, 0, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    
+
+    // Initialize slot table for word_id → slot mapping (HOT/COLD ARCHITECTURE)
+    printf("   Initializing slot table (max %d cold vocab)...\n", MAX_COLD_VOCAB);
+    init_slot_table(&g_system->slot_table, MAX_COLD_VOCAB);
+    printf("   ✅ Slot table ready: %d hot slots available\n", MAX_WORD_VOCAB_SIZE);
+
     // Initialize random sequence (solo caratteri inizialmente)
     int* h_init_seq = (int*)malloc(64 * sizeof(int));
     for (int i = 0; i < 64; i++) h_init_seq[i] = rand() % CHAR_VOCAB_SIZE;
@@ -1861,7 +1872,10 @@ void shutdown_system(void) {
     // Cleanup buffer k-means
     cudaFree(g_system->venn.cluster_sums);
     cudaFree(g_system->venn.cluster_counts);
-    
+
+    // Free slot table
+    free_slot_table(&g_system->slot_table);
+
     // Free episodic
     cudaFree(g_system->episodic.episode_embeddings);
     cudaFree(g_system->episodic.rewards);
