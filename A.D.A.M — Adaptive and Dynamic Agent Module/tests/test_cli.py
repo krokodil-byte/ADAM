@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Try to import CLI module - may fail due to relative imports
 try:
-    from cli.vectllm import (
+    from cli.adam import (
         cmd_init, cmd_train, cmd_generate, cmd_stats,
         cmd_vocab, cmd_checkpoint, cmd_chat, cmd_dataset,
         cmd_wikipedia, main

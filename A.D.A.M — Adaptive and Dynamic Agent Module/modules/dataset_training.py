@@ -30,7 +30,7 @@ except ImportError:
     from ..core.stats import StatsCollector
     from ..core.pipeline import PipelinedTrainer
     from ..core.config import TRAINING_CONFIG
-    from ..utils.checkpoint import CheckpointManager
+    from ..Utils.checkpoint import CheckpointManager
     from ..modules.training_logger import get_logger
 
 # Try to import pyarrow for Parquet support

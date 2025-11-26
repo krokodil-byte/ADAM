@@ -16,7 +16,7 @@ try:
 except ImportError:
     from ..core.brain_wrapper import VectLLMBrain
     from ..core.stats import StatsCollector
-    from ..utils.checkpoint import CheckpointManager
+    from ..Utils.checkpoint import CheckpointManager
 
 
 class MultiPassTrainer:
