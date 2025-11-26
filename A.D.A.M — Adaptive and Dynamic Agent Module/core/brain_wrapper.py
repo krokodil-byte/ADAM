@@ -250,7 +250,7 @@ class VectLLMBrain:
             self._pinned_embeddings = np.zeros(min_words * embed_dim, dtype=np.float32)
 
             # For AMD with Infinity Cache, ensure 64-byte alignment (cache line)
-            if self._gpu_vendor == "AMD" and VOCAB_OPTIMIZATION_CONFIG.AMD_INFINITY_CACHE:
+            if self._gpu_vendor == "AMD" and VOCAB_OPTIMIZATION_CONFIG.ENABLE_AMD_INFINITY_CACHE:
                 # Reallocate with explicit alignment
                 self._pinned_word_ids = np.require(
                     self._pinned_word_ids, requirements=['C_CONTIGUOUS', 'ALIGNED']
