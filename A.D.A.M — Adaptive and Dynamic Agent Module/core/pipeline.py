@@ -173,6 +173,14 @@ class AsyncBatchLoader:
         """Numero di batch in attesa"""
         return self.batch_queue.qsize()
 
+    def is_done(self) -> bool:
+        """Check if all work is done (no pending texts, no batches in queue)"""
+        return self.text_queue.empty() and self.batch_queue.empty()
+
+    def finish_input(self):
+        """Signal that no more texts will be submitted"""
+        self.text_queue.put(None)
+
     def get_stats(self) -> dict:
         """Statistiche loader"""
         return {
@@ -377,6 +385,16 @@ class MultiProcessBatchLoader:
         """Numero di batch in attesa"""
         return self.batch_queue.qsize()
 
+    def is_done(self) -> bool:
+        """Check if all work is done (no pending results, no batches in queue)"""
+        with self.results_lock:
+            has_pending = len(self.pending_results) > 0
+        return not has_pending and self.batch_queue.empty()
+
+    def finish_input(self):
+        """Signal that no more texts will be submitted (no-op for multiprocess loader)"""
+        pass
+
     def get_stats(self) -> dict:
         """Statistiche loader"""
         with self.results_lock:
@@ -511,15 +529,18 @@ class PipelinedTrainer:
                     if batch:
                         self._process_batch(batch, callback)
 
-            # Process batch rimanenti
+            # Signal end of texts to worker (so it knows to stop after processing remaining texts)
+            self.loader.finish_input()
+
+            # Process batch rimanenti finché il loader non ha finito tutto il lavoro
             while True:
                 batch = self.loader.get_batch(timeout=0.5)
-                if batch is None:
-                    # Check se loader ha ancora lavoro
-                    if self.loader.text_queue.empty() and not self.loader.has_batches():
-                        break
-                else:
+                if batch is not None:
                     self._process_batch(batch, callback)
+                elif self.loader.is_done():
+                    # No more batches and all work is complete
+                    break
+                # else: batch is None but loader not done yet, keep waiting
 
         finally:
             self.stop()
