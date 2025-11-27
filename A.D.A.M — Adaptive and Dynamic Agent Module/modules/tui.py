@@ -138,132 +138,13 @@ class ADAMTUI:
             'settings': {
                 'title': 'Settings',
                 'items': [
-                    ('model', '🏗️  Model Architecture', 'Layers, dimensions, heads'),
-                    ('vocabulary', '📚 Vocabulary', 'Word creation, pruning, max length'),
-                    ('venn', '🔷 Venn System', 'Clusters, propagation, semantic'),
-                    ('training', '📈 Training Parameters', 'Learning rate, momentum, auto-save'),
+                    ('model', '🏗️  Model & Venn', 'Architecture, vocabulary, Venn system'),
+                    ('training', '📈 Training', 'Learning rates, batch size, validation'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU/CUDA optimizations'),
                     ('vocab_opt', '🔤 Vocab Optimization', 'Hot/cold, caching, preloading'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
-                ]
-            },
-            'model': {
-                'title': 'Model Architecture',
-                'items': [
-                    ('num_layers', '📚 Layers', 'Number of transformer layers'),
-                    ('embed_dim', '📏 Embedding Dim', 'Embedding dimension'),
-                    ('num_heads', '👥 Attention Heads', 'Number of attention heads'),
-                    ('max_seq_len', '📐 Max Sequence', 'Maximum sequence length'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'vocabulary': {
-                'title': 'Vocabulary Settings',
-                'items': [
-                    ('word_creation', '➕ Word Creation Threshold', 'Create word token after N occurrences'),
-                    ('word_pruning', '✂️  Word Pruning Threshold', 'Prune words with < N occurrences (0=never)'),
-                    ('max_word_len', '📏 Max Word Length', 'Maximum characters per word'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'venn': {
-                'title': 'Venn Semantic System',
-                'items': [
-                    ('enable_multihead', '🎭 Multi-Head Mode', 'Enable revolutionary Multi-Head Venn architecture'),
-                    ('num_venn_heads', '👥 Number of Heads', 'Number of Venn heads (multi-head mode only)'),
-                    ('clusters_per_head', '🔷 Clusters per Head', 'Clusters per head (multi-head mode)'),
-                    ('venn_clusters', '🔷 Total Clusters', 'Total semantic clusters (legacy single-head)'),
-                    ('venn_propagation', '📡 Propagation Factor', 'Activation propagation (0.0-1.0)'),
-                    ('venn_threshold', '🎯 Intersection Threshold', 'Threshold for connected clusters'),
-                    ('max_propagation', '📊 Max Propagation', 'Maximum propagated activation cap'),
-                    ('venn_temperature', '🌡️  Activation Temperature', 'Gaussian activation temperature'),
-                    ('primary_weight', '1️⃣  Primary Weight', 'Weight for primary (closest) cluster'),
-                    ('secondary_weight', '2️⃣  Secondary Weight', 'Weight for secondary cluster'),
-                    ('venn_update_lr', '📈 Update LR', 'Learning rate for cluster updates'),
-                    ('episodic_buffer', '💾 Episodic Buffer', 'Episodic memory buffer size'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'training': {
-                'title': 'Training Parameters',
-                'items': [
-                    ('base_lr', '📈 Base Learning Rate', 'Base learning rate'),
-                    ('embedding_lr_scale', '🔤 Embedding LR Scale', 'Scale for embedding LR (0.1 = 10% of base)'),
-                    ('output_lr_scale', '📤 Output LR Scale', 'Scale for output layer LR (1.0 = 100% of base)'),
-                    ('momentum', '⚡ Momentum', 'SGD momentum (0.0-1.0)'),
-                    ('temperature', '🌡️  Temperature', 'Exploration temperature'),
-                    ('venn_update_freq', '🔄 Venn Update Freq', 'Update clusters every N cycles'),
-                    ('stats_sync_freq', '📊 Stats Sync Freq', 'Sync GPU stats every N cycles'),
-                    ('validate_per_pass', '✓ Validate Per Pass', 'True=validate per pass, False=every N samples'),
-                    ('batch_size', '📦 Batch Size', 'Items per batch (all sources)'),
-                    ('min_text_length', '📏 Min Text Length', 'Minimum text length in chars (filter)'),
-                    ('api_batch_size', '🌐 API Batch Size', 'Items per API request'),
-                    ('auto_save_freq', '💾 Auto-save Freq', 'Auto-save every N samples'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'vocab_opt': {
-                'title': 'Vocab Optimization Settings',
-                'items': [
-                    ('enable_opt', '✓ Enable Optimization', 'Enable vocab optimization'),
-                    ('cache_char_emb', '🔤 Cache Char Embeddings', 'Cache character embeddings'),
-                    ('cache_ttl', '⏱️  Cache TTL', 'Refresh cache every N syncs'),
-                    ('numpy_batch_ops', '🔢 Numpy Batch Ops', 'Use numpy for batch embedding computation'),
-                    ('batch_sync', '🔄 Batch Sync', 'Use batch GPU sync (single call for N words)'),
-                    ('max_hot', '📊 Max Hot Vocab', 'Maximum words in GPU (hot vocab)'),
-                    ('lru_eviction', '📋 LRU Eviction', 'Use LRU eviction strategy'),
-                    ('deferred_sync', '⏳ Deferred Sync', 'Batch vocab syncs until end of pass'),
-                    ('defer_validation', '✓ Defer in Validation', 'Also defer during validation'),
-                    ('token_preload', '⚡ Token Preloading', 'Pre-load tokens from cold to hot'),
-                    ('preload_batch', '📦 Preload Batch Size', 'Max tokens to preload in one batch'),
-                    ('save_cold', '💾 Save Cold Vocab', 'Save cold vocab to checkpoint'),
-                    ('cold_compression', '🗜️  Cold Compression', 'Use compression (.npz) for cold vocab'),
-                    ('auto_load_cold', '📥 Auto Load Cold', 'Auto-load cold vocab from checkpoint'),
-                    ('amd_sam', '🔴 AMD SAM', 'Enable AMD Smart Access Memory (Resizable BAR)'),
-                    ('amd_infinity', '♾️  AMD Infinity Cache', 'Enable AMD Infinity Cache optimization'),
-                    ('unified_memory', '🔗 Unified Memory', 'Use CUDA unified memory (experimental)'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'generation': {
-                'title': 'Generation Settings (Continuation Bias)',
-                'items': [
-                    ('temperature', '🌡️  Temperature', 'Sampling temperature (higher = more random)'),
-                    ('min_confidence', '📉 Min Confidence', 'Stop when token probability below this'),
-                    ('confidence_decay', '📊 Confidence Decay', 'EMA decay for confidence tracking'),
-                    ('low_streak', '🔢 Low Confidence Streak', 'Stop after N low confidence tokens'),
-                    ('max_tokens', '📏 Max Tokens', 'Maximum tokens per response'),
-                    ('min_tokens', '📐 Min Tokens', 'Minimum before confidence check'),
-                    ('stop_newline', '↵ Stop on Newline', 'Stop on double newline'),
-                    ('stop_period', '• Stop on Period', 'Stop on sentence end'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'performance': {
-                'title': 'Performance Settings',
-                'items': [
-                    ('gpu_arch', '🖥️ GPU Arch', 'CUDA compute capability (sm_86 for RTX 30xx)'),
-                    ('use_cublas', '🔢 Use cuBLAS', 'Enable cuBLAS for matrix operations'),
-                    ('cublas_backward', '🔙 cuBLAS Backward', 'Use cuBLAS for gradient computation'),
-                    ('use_fused', '🧩 Fused Kernels', 'Enable fused attention+FFN kernels'),
-                    ('fused_embedding', '📝 Fused Embedding', 'Enable fused embedding+layernorm'),
-                    ('pipeline', '🔀 Pipeline Mode', 'H2D/compute/D2H overlap'),
-                    ('async', '⚡ Async Transfers', 'Asynchronous memory transfers'),
-                    ('compute_streams', '🌊 Compute Streams', 'Number of compute streams'),
-                    ('overlap_h2d', '🔄 Overlap H2D/Compute', 'Overlap transfers with compute'),
-                    ('pinned', '📌 Pinned Memory', 'Use pinned host memory'),
-                    ('preallocate', '📦 Preallocate', 'Preallocate buffers at init'),
-                    ('pinned_buffer', '📌 Pinned Buffer Min', 'Minimum pinned buffer size (words)'),
-                    ('block_size', '🧱 Block Size', 'Default CUDA block size'),
-                    ('warp', '🔄 Warp Primitives', 'Use warp-level shuffle operations'),
-                    ('target', '🎯 GPU Target', 'Target GPU utilization %'),
-                    ('cpu_workers', '👷 CPU Workers', 'Number of CPU workers for preprocessing'),
-                    ('prefetch', '📥 Prefetch Size', 'Number of batches to prefetch'),
-                    ('stats_window', '📊 Stats Window', 'Rolling window size for stats'),
-                    ('stats_history', '📜 Stats History', 'Number of historical stats to keep'),
-                    ('back', '← Back', 'Return to settings'),
                 ]
             },
         }
@@ -604,6 +485,12 @@ class ADAMTUI:
         if key == 'model':
             self._edit_settings(stdscr, 'model')
             return
+        elif key == 'vocabulary':
+            self._edit_settings(stdscr, 'model')  # Vocabulary settings are in model config
+            return
+        elif key == 'venn':
+            self._edit_settings(stdscr, 'model')  # Venn settings are in model config
+            return
         elif key == 'training':
             self._edit_settings(stdscr, 'training')
             return
@@ -614,8 +501,7 @@ class ADAMTUI:
             self._edit_settings(stdscr, 'performance')
             return
         elif key == 'vocab_opt':
-            self.current_menu = 'vocab_opt'
-            self.selected_item = 0
+            self._edit_settings(stdscr, 'vocab_optimization')  # Use _edit_settings instead of menu navigation
             return
         elif key == 'save':
             self._save_settings()
