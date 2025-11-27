@@ -171,7 +171,10 @@ class ADAMTUI:
             'venn': {
                 'title': 'Venn Semantic System',
                 'items': [
-                    ('venn_clusters', '🔷 Clusters', 'Number of semantic clusters'),
+                    ('enable_multihead', '🎭 Multi-Head Mode', 'Enable revolutionary Multi-Head Venn architecture'),
+                    ('num_venn_heads', '👥 Number of Heads', 'Number of Venn heads (multi-head mode only)'),
+                    ('clusters_per_head', '🔷 Clusters per Head', 'Clusters per head (multi-head mode)'),
+                    ('venn_clusters', '🔷 Total Clusters', 'Total semantic clusters (legacy single-head)'),
                     ('venn_propagation', '📡 Propagation Factor', 'Activation propagation (0.0-1.0)'),
                     ('venn_threshold', '🎯 Intersection Threshold', 'Threshold for connected clusters'),
                     ('venn_update_lr', '📈 Update LR', 'Learning rate for cluster updates'),
@@ -253,6 +256,11 @@ class ADAMTUI:
                 'word_creation_threshold': MODEL_CONFIG.WORD_CREATION_THRESHOLD,
                 'word_pruning_threshold': MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
                 'max_word_length': MODEL_CONFIG.MAX_WORD_LENGTH,
+                # Multi-Head Venn parameters
+                'enable_venn_multihead': MODEL_CONFIG.ENABLE_VENN_MULTIHEAD,
+                'num_venn_heads': MODEL_CONFIG.NUM_VENN_HEADS,
+                'venn_clusters_per_head': MODEL_CONFIG.VENN_CLUSTERS_PER_HEAD,
+                # Legacy single-head parameters
                 'venn_clusters': MODEL_CONFIG.VENN_CLUSTERS,
                 'venn_propagation_factor': MODEL_CONFIG.VENN_PROPAGATION_FACTOR,
                 'venn_intersection_threshold': MODEL_CONFIG.VENN_INTERSECTION_THRESHOLD,
