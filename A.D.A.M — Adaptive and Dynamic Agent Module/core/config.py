@@ -118,13 +118,10 @@ class TrainingConfig:
     # Checkpoint settings
     AUTO_SAVE_FREQUENCY: int = 1000  # Auto-save ogni N articles/samples
 
-    # Wikipedia training settings
-    WIKIPEDIA_BATCH_SIZE: int = 100  # Articles per batch
-    WIKIPEDIA_MIN_ARTICLE_LENGTH: int = 500  # Minimum article length in chars
-    WIKIPEDIA_API_BATCH_SIZE: int = 10  # Articles per API request
-
-    # Dataset training settings
-    DATASET_MIN_FILE_LENGTH: int = 100  # Minimum file length in chars
+    # Generic training settings (used by Wikipedia, Dataset, and all data sources)
+    BATCH_SIZE: int = 100  # Items (articles/files) per batch
+    MIN_TEXT_LENGTH: int = 500  # Minimum text length in chars (for filtering)
+    API_BATCH_SIZE: int = 10  # Items per API request (for Wikipedia/future API sources)
 
 
 @dataclass
@@ -245,7 +242,7 @@ def get_config_preset(preset_name: str = "default"):
                 MOMENTUM=0.7,
                 EXPLORATION_TEMPERATURE=1.5,
                 VENN_UPDATE_FREQUENCY=50,
-                WIKIPEDIA_BATCH_SIZE=200,  # Larger batches for faster learning
+                BATCH_SIZE=200,  # Larger batches for faster learning
                 AUTO_SAVE_FREQUENCY=500,  # More frequent saves
             ),
             "model": ModelConfig(

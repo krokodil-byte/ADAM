@@ -72,9 +72,9 @@ class WikipediaAPIFetcher:
         """
         # Use config defaults if not specified
         if batch_size is None:
-            batch_size = TRAINING_CONFIG.WIKIPEDIA_BATCH_SIZE
+            batch_size = TRAINING_CONFIG.BATCH_SIZE
         if min_article_length is None:
-            min_article_length = TRAINING_CONFIG.WIKIPEDIA_MIN_ARTICLE_LENGTH
+            min_article_length = TRAINING_CONFIG.MIN_TEXT_LENGTH
 
         self.language = language
         self.ram_percentage = ram_percentage
@@ -114,7 +114,7 @@ class WikipediaAPIFetcher:
     def _get_random_titles(self, count: Optional[int] = None) -> List[str]:
         """Get random article titles"""
         if count is None:
-            count = TRAINING_CONFIG.WIKIPEDIA_API_BATCH_SIZE
+            count = TRAINING_CONFIG.API_BATCH_SIZE
         params = {
             'action': 'query',
             'list': 'random',
@@ -168,7 +168,7 @@ class WikipediaAPIFetcher:
             Number of articles fetched in this batch
         """
         if api_batch_size is None:
-            api_batch_size = TRAINING_CONFIG.WIKIPEDIA_API_BATCH_SIZE
+            api_batch_size = TRAINING_CONFIG.API_BATCH_SIZE
         fetched = 0
         target_articles = self.batch_size
 
@@ -489,7 +489,7 @@ class WikipediaStreamTrainer:
             validate_per_pass: If True, validate only at end of each pass; if False, validate every N articles
         """
         if batch_size is None:
-            batch_size = TRAINING_CONFIG.WIKIPEDIA_BATCH_SIZE
+            batch_size = TRAINING_CONFIG.BATCH_SIZE
 
         self.brain = brain
         self.fetcher = WikipediaAPIFetcher(
