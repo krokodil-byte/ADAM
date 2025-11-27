@@ -5,7 +5,7 @@ Run with: python -m vectllm
 """
 
 import sys
-from cli.vectllm import main
+from cli.adam import main
 
 if __name__ == "__main__":
     sys.exit(main())

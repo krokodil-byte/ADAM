@@ -52,12 +52,18 @@ class TrainingMetrics:
 class StatsCollector:
     """Raccolta statistiche durante training"""
 
-    def __init__(self, window_size: int = 100, history_sample_rate: int = 1):
+    def __init__(self, window_size: Optional[int] = None, history_sample_rate: int = 1):
         """
         Args:
-            window_size: Dimensione finestra per medie mobili
+            window_size: Dimensione finestra per medie mobili (default: from PERFORMANCE_CONFIG)
             history_sample_rate: Record history every N updates (1=all, 10=every 10th)
         """
+        # Import here to avoid circular dependency
+        from .config import PERFORMANCE_CONFIG
+
+        if window_size is None:
+            window_size = PERFORMANCE_CONFIG.STATS_WINDOW_SIZE
+
         self.metrics = TrainingMetrics()
         self.window_size = window_size
         self.history_sample_rate = history_sample_rate
@@ -174,11 +180,15 @@ class StatsCollector:
         }
         self.checkpoint_metrics.append(snapshot)
     
-    def get_loss_trend(self, last_n: int = 100) -> str:
+    def get_loss_trend(self, last_n: Optional[int] = None) -> str:
         """Ottieni trend loss (↑ ↓ →)"""
+        if last_n is None:
+            from .config import PERFORMANCE_CONFIG
+            last_n = PERFORMANCE_CONFIG.STATS_WINDOW_SIZE
+
         if len(self.loss_window) < 10:
             return "→"
-        
+
         recent = list(self.loss_window)[-last_n:]
         first_half = sum(recent[:len(recent)//2]) / (len(recent)//2)
         second_half = sum(recent[len(recent)//2:]) / (len(recent) - len(recent)//2)

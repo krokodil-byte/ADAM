@@ -24,8 +24,11 @@ class ModelConfig:
     WORD_PRUNING_THRESHOLD: int = 0  # 0 = mai pruning, cold vocab infinito (la RAM è abbondante!)
     MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
 
-    # Venn Semantic System
-    VENN_CLUSTERS: int = 256
+    # Venn Semantic System - Multi-Head Architecture
+    ENABLE_VENN_MULTIHEAD: bool = True  # Enable Multi-Head Venn (revolutionary!)
+    NUM_VENN_HEADS: int = 12  # Number of Venn heads (matches NUM_HEADS for symmetry)
+    VENN_CLUSTERS_PER_HEAD: int = 256  # Clusters per head (total: NUM_VENN_HEADS × VENN_CLUSTERS_PER_HEAD)
+    VENN_CLUSTERS: int = 256  # Backward compatibility (used only if ENABLE_VENN_MULTIHEAD=False)
 
     # Venn Activation & Propagation
     VENN_PROPAGATION_FACTOR: float = 0.2  # Quanto le attivazioni si propagano tra cluster vicini (0.0-1.0)
@@ -115,6 +118,11 @@ class TrainingConfig:
     # Checkpoint settings
     AUTO_SAVE_FREQUENCY: int = 1000  # Auto-save ogni N articles/samples
 
+    # Generic training settings (used by Wikipedia, Dataset, and all data sources)
+    BATCH_SIZE: int = 100  # Items (articles/files) per batch
+    MIN_TEXT_LENGTH: int = 500  # Minimum text length in chars (for filtering)
+    API_BATCH_SIZE: int = 10  # Items per API request (for Wikipedia/future API sources)
+
 
 @dataclass
 class PerformanceConfig:
@@ -143,6 +151,7 @@ class PerformanceConfig:
     # Memory optimization
     USE_PINNED_MEMORY: bool = True  # Use pinned host memory for faster transfers
     PREALLOCATE_BUFFERS: bool = True  # Pre-allocate all buffers at init
+    PINNED_BUFFER_MIN_WORDS: int = 1000  # Minimum pinned buffer size for vocab sync
 
     # Kernel tuning
     BLOCK_SIZE: int = 256  # Default CUDA block size
@@ -150,6 +159,10 @@ class PerformanceConfig:
 
     # Target utilization
     GPU_UTILIZATION_TARGET: int = 80  # Target GPU utilization %
+
+    # Stats collection
+    STATS_WINDOW_SIZE: int = 100  # Rolling window for stats averaging
+    STATS_HISTORY_SIZE: int = 1000  # Number of historical stats to keep
 
 
 @dataclass
@@ -228,9 +241,13 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.001,
                 MOMENTUM=0.7,
                 EXPLORATION_TEMPERATURE=1.5,
-                VENN_UPDATE_FREQUENCY=50
+                VENN_UPDATE_FREQUENCY=50,
+                BATCH_SIZE=200,  # Larger batches for faster learning
+                AUTO_SAVE_FREQUENCY=500,  # More frequent saves
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                WORD_CREATION_THRESHOLD=3,  # Accept words faster
+            ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
         },
@@ -273,9 +290,13 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.0005,
                 MOMENTUM=0.8,
                 EXPLORATION_TEMPERATURE=2.0,
-                VENN_UPDATE_FREQUENCY=25
+                VENN_UPDATE_FREQUENCY=25,
+                AUTO_SAVE_FREQUENCY=100,  # Frequent checkpoints for experiments
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                WORD_CREATION_THRESHOLD=2,  # More aggressive word creation
+                VENN_PROPAGATION_FACTOR=0.3,  # Higher semantic propagation
+            ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
         },

@@ -232,14 +232,17 @@ class VectLLMBrain:
         if PERFORMANCE_CONFIG.USE_PINNED_MEMORY:
             self._allocate_pinned_buffers()
 
-    def _allocate_pinned_buffers(self, min_words: int = 1000):
+    def _allocate_pinned_buffers(self, min_words: Optional[int] = None):
         """
         Allocate pinned memory buffers for faster CPU<->GPU transfers.
         Uses numpy arrays with aligned memory for optimal DMA transfers.
 
         Args:
-            min_words: Minimum buffer size in words
+            min_words: Minimum buffer size in words (default: from PERFORMANCE_CONFIG)
         """
+        if min_words is None:
+            min_words = PERFORMANCE_CONFIG.PINNED_BUFFER_MIN_WORDS
+
         try:
             embed_dim = MODEL_CONFIG.EMBED_DIM
 
@@ -250,7 +253,7 @@ class VectLLMBrain:
             self._pinned_embeddings = np.zeros(min_words * embed_dim, dtype=np.float32)
 
             # For AMD with Infinity Cache, ensure 64-byte alignment (cache line)
-            if self._gpu_vendor == "AMD" and VOCAB_OPTIMIZATION_CONFIG.AMD_INFINITY_CACHE:
+            if self._gpu_vendor == "AMD" and VOCAB_OPTIMIZATION_CONFIG.ENABLE_AMD_INFINITY_CACHE:
                 # Reallocate with explicit alignment
                 self._pinned_word_ids = np.require(
                     self._pinned_word_ids, requirements=['C_CONTIGUOUS', 'ALIGNED']

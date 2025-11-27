@@ -30,7 +30,7 @@ except ImportError:
     from ..core.stats import StatsCollector
     from ..core.pipeline import PipelinedTrainer
     from ..core.config import TRAINING_CONFIG
-    from ..utils.checkpoint import CheckpointManager
+    from ..Utils.checkpoint import CheckpointManager
     from ..modules.training_logger import get_logger
 
 # Try to import pyarrow for Parquet support
@@ -490,7 +490,7 @@ class HFDatasetTrainer:
 
     def train(self,
               passes: int = 1,
-              auto_save_every: int = 1000,
+              auto_save_every: Optional[int] = None,
               verbose: bool = True,
               use_pipeline: bool = True,
               prefetch_size: int = 3,
@@ -501,7 +501,7 @@ class HFDatasetTrainer:
 
         Args:
             passes: Number of training passes
-            auto_save_every: Auto-save every N samples
+            auto_save_every: Auto-save every N samples (default: from TRAINING_CONFIG)
             verbose: Print progress
             use_pipeline: Use pipelined training for CPU/GPU overlap
             prefetch_size: Number of batches to prefetch (if use_pipeline)
@@ -511,6 +511,9 @@ class HFDatasetTrainer:
         Returns:
             Final statistics
         """
+        if auto_save_every is None:
+            auto_save_every = TRAINING_CONFIG.AUTO_SAVE_FREQUENCY
+
         dataset_stats = self.loader.get_stats()
         train_samples_count = len(self.train_samples)
 

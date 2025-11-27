@@ -138,58 +138,13 @@ class ADAMTUI:
             'settings': {
                 'title': 'Settings',
                 'items': [
-                    ('model', '🏗️  Model Architecture', 'Layers, dimensions, heads'),
-                    ('training', '📈 Training Parameters', 'Learning rate, momentum'),
+                    ('model', '🏗️  Model & Venn', 'Architecture, vocabulary, Venn system'),
+                    ('training', '📈 Training', 'Learning rates, batch size, validation'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU/CUDA optimizations'),
-                    ('vocab_opt', '🔤 Vocab Optimization', 'Enable vocab caching'),
+                    ('vocab_opt', '🔤 Vocab Optimization', 'Hot/cold, caching, preloading'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
-                ]
-            },
-            'vocab_opt': {
-                'title': 'Vocab Optimization Settings',
-                'items': [
-                    ('enabled', '✓ Enable Optimization', 'Enable vocab optimization (caching, batching)'),
-                    ('hot_cold', '🔥❄️  Hot/Cold Vocab', 'Enable hot/cold vocabulary architecture'),
-                    ('max_hot', '📊 Max Hot Vocab', 'Maximum words in GPU (hot vocab)'),
-                    ('usage_threshold', '📈 Usage Threshold', 'Min uses to stay in hot vocab'),
-                    ('refresh_interval', '🔄 Refresh Interval', 'Check hot/cold every N words'),
-                    ('lru', '📋 LRU Eviction', 'Use LRU eviction (vs frequency-based)'),
-                    ('pinned_mem', '📌 Pinned Memory', 'Use pinned memory for faster transfers'),
-                    ('amd_infinity', '🔴 AMD Infinity Cache', 'Enable AMD SAM/Infinity Cache path'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'generation': {
-                'title': 'Generation Settings (Continuation Bias)',
-                'items': [
-                    ('temperature', '🌡️  Temperature', 'Sampling temperature (higher = more random)'),
-                    ('min_confidence', '📉 Min Confidence', 'Stop when token probability below this'),
-                    ('confidence_decay', '📊 Confidence Decay', 'EMA decay for confidence tracking'),
-                    ('low_streak', '🔢 Low Confidence Streak', 'Stop after N low confidence tokens'),
-                    ('max_tokens', '📏 Max Tokens', 'Maximum tokens per response'),
-                    ('min_tokens', '📐 Min Tokens', 'Minimum before confidence check'),
-                    ('stop_newline', '↵ Stop on Newline', 'Stop on double newline'),
-                    ('stop_period', '• Stop on Period', 'Stop on sentence end'),
-                    ('back', '← Back', 'Return to settings'),
-                ]
-            },
-            'performance': {
-                'title': 'Performance Settings',
-                'items': [
-                    ('gpu_arch', '🖥️ GPU Arch', 'CUDA compute capability (sm_86 for RTX 30xx)'),
-                    ('use_cublas', '🔢 Use cuBLAS', 'Enable cuBLAS for matrix operations'),
-                    ('use_fused', '🧩 Fused Kernels', 'Enable fused attention+FFN kernels'),
-                    ('pipeline', '🔀 Pipeline Mode', 'H2D/compute/D2H overlap'),
-                    ('async', '⚡ Async Transfers', 'Asynchronous memory transfers'),
-                    ('pinned', '📌 Pinned Memory', 'Use pinned host memory'),
-                    ('warp', '🔄 Warp Primitives', 'Use warp-level shuffle operations'),
-                    ('target', '🎯 GPU Target', 'Target GPU utilization %'),
-                    ('preallocate', '📦 Preallocate', 'Preallocate buffers at init'),
-                    ('cpu_workers', '👷 CPU Workers', 'Number of CPU workers for preprocessing'),
-                    ('prefetch', '📥 Prefetch Size', 'Number of batches to prefetch'),
-                    ('back', '← Back', 'Return to settings'),
                 ]
             },
         }
@@ -202,30 +157,83 @@ class ADAMTUI:
                 'embed_dim': MODEL_CONFIG.EMBED_DIM,
                 'num_heads': MODEL_CONFIG.NUM_HEADS,
                 'max_seq_len': MODEL_CONFIG.MAX_SEQ_LEN,
-                'max_hot_vocab': VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB,
+                'word_creation_threshold': MODEL_CONFIG.WORD_CREATION_THRESHOLD,
+                'word_pruning_threshold': MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
+                'max_word_length': MODEL_CONFIG.MAX_WORD_LENGTH,
+                # Multi-Head Venn parameters
+                'enable_venn_multihead': MODEL_CONFIG.ENABLE_VENN_MULTIHEAD,
+                'num_venn_heads': MODEL_CONFIG.NUM_VENN_HEADS,
+                'venn_clusters_per_head': MODEL_CONFIG.VENN_CLUSTERS_PER_HEAD,
+                # Legacy single-head parameters
+                'venn_clusters': MODEL_CONFIG.VENN_CLUSTERS,
+                'venn_propagation_factor': MODEL_CONFIG.VENN_PROPAGATION_FACTOR,
+                'venn_intersection_threshold': MODEL_CONFIG.VENN_INTERSECTION_THRESHOLD,
+                'max_propagated_activation': MODEL_CONFIG.MAX_PROPAGATED_ACTIVATION,
+                'venn_activation_temperature': MODEL_CONFIG.VENN_ACTIVATION_TEMPERATURE,
+                'primary_membership_weight': MODEL_CONFIG.PRIMARY_MEMBERSHIP_WEIGHT,
+                'secondary_membership_weight': MODEL_CONFIG.SECONDARY_MEMBERSHIP_WEIGHT,
+                'venn_update_lr': MODEL_CONFIG.CLUSTER_UPDATE_LR,
+                'episodic_buffer_size': MODEL_CONFIG.EPISODIC_BUFFER_SIZE,
             },
             'training': {
                 'base_lr': TRAINING_CONFIG.BASE_LR,
+                'embedding_lr_scale': TRAINING_CONFIG.EMBEDDING_LR_SCALE,
+                'output_lr_scale': TRAINING_CONFIG.OUTPUT_LR_SCALE,
                 'momentum': TRAINING_CONFIG.MOMENTUM,
                 'temperature': TRAINING_CONFIG.EXPLORATION_TEMPERATURE,
+                'venn_update_frequency': TRAINING_CONFIG.VENN_UPDATE_FREQUENCY,
+                'stats_sync_frequency': TRAINING_CONFIG.STATS_SYNC_FREQUENCY,
                 'validation_split': TRAINING_CONFIG.VALIDATION_SPLIT,
                 'validation_frequency': TRAINING_CONFIG.VALIDATION_FREQUENCY,
+                'validate_per_pass': TRAINING_CONFIG.VALIDATE_PER_PASS,
                 'early_stopping_patience': TRAINING_CONFIG.EARLY_STOPPING_PATIENCE,
                 'min_validation_samples': TRAINING_CONFIG.MIN_VALIDATION_SAMPLES,
+                'auto_save_frequency': TRAINING_CONFIG.AUTO_SAVE_FREQUENCY,
+                # Unified generic parameters (for all data sources)
+                'batch_size': TRAINING_CONFIG.BATCH_SIZE,
+                'min_text_length': TRAINING_CONFIG.MIN_TEXT_LENGTH,
+                'api_batch_size': TRAINING_CONFIG.API_BATCH_SIZE,
+            },
+            'vocab_optimization': {
+                'enable_optimization': VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION,
+                'cache_char_embeddings': VOCAB_OPTIMIZATION_CONFIG.CACHE_CHAR_EMBEDDINGS,
+                'char_embedding_cache_ttl': VOCAB_OPTIMIZATION_CONFIG.CHAR_EMBEDDING_CACHE_TTL,
+                'use_numpy_batch_ops': VOCAB_OPTIMIZATION_CONFIG.USE_NUMPY_BATCH_OPS,
+                'use_batch_sync': VOCAB_OPTIMIZATION_CONFIG.USE_BATCH_SYNC,
+                'max_hot_vocab': VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB,
+                'lru_eviction': VOCAB_OPTIMIZATION_CONFIG.LRU_EVICTION,
+                'enable_deferred_sync': VOCAB_OPTIMIZATION_CONFIG.ENABLE_DEFERRED_SYNC,
+                'defer_during_validation': VOCAB_OPTIMIZATION_CONFIG.DEFER_DURING_VALIDATION,
+                'enable_token_preloading': VOCAB_OPTIMIZATION_CONFIG.ENABLE_TOKEN_PRELOADING,
+                'preload_batch_size': VOCAB_OPTIMIZATION_CONFIG.PRELOAD_BATCH_SIZE,
+                'save_cold_vocab': VOCAB_OPTIMIZATION_CONFIG.SAVE_COLD_VOCAB,
+                'cold_vocab_compression': VOCAB_OPTIMIZATION_CONFIG.COLD_VOCAB_COMPRESSION,
+                'auto_load_cold': VOCAB_OPTIMIZATION_CONFIG.AUTO_LOAD_COLD,
+                'enable_amd_sam': VOCAB_OPTIMIZATION_CONFIG.ENABLE_AMD_SAM,
+                'enable_amd_infinity_cache': VOCAB_OPTIMIZATION_CONFIG.ENABLE_AMD_INFINITY_CACHE,
+                'prefer_unified_memory': VOCAB_OPTIMIZATION_CONFIG.PREFER_UNIFIED_MEMORY,
             },
             'performance': {
                 'gpu_arch': RUNTIME_CONFIG.NVCC_ARCH,
                 'device_id': RUNTIME_CONFIG.DEVICE_ID,
                 'use_cublas': PERFORMANCE_CONFIG.USE_CUBLAS,
+                'use_cublas_backward': PERFORMANCE_CONFIG.USE_CUBLAS_BACKWARD,
                 'use_fused': PERFORMANCE_CONFIG.USE_FUSED_KERNELS,
+                'use_fused_embedding': PERFORMANCE_CONFIG.USE_FUSED_EMBEDDING,
                 'pipeline': PERFORMANCE_CONFIG.PIPELINE_MODE,
                 'async': PERFORMANCE_CONFIG.ASYNC_TRANSFERS,
+                'num_compute_streams': PERFORMANCE_CONFIG.NUM_COMPUTE_STREAMS,
+                'overlap_h2d_compute': PERFORMANCE_CONFIG.OVERLAP_H2D_COMPUTE,
                 'pinned': PERFORMANCE_CONFIG.USE_PINNED_MEMORY,
+                'preallocate': PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS,
+                'pinned_buffer_min_words': PERFORMANCE_CONFIG.PINNED_BUFFER_MIN_WORDS,
+                'block_size': PERFORMANCE_CONFIG.BLOCK_SIZE,
                 'warp': PERFORMANCE_CONFIG.USE_WARP_PRIMITIVES,
                 'target': PERFORMANCE_CONFIG.GPU_UTILIZATION_TARGET,
-                'preallocate': PERFORMANCE_CONFIG.PREALLOCATE_BUFFERS,
                 'cpu_workers': PERFORMANCE_CONFIG.NUM_CPU_WORKERS,
                 'prefetch': PERFORMANCE_CONFIG.PREFETCH_SIZE,
+                'stats_window_size': PERFORMANCE_CONFIG.STATS_WINDOW_SIZE,
+                'stats_history_size': PERFORMANCE_CONFIG.STATS_HISTORY_SIZE,
             },
             'generation': {
                 'temperature': GENERATION_CONFIG.TEMPERATURE,
@@ -477,6 +485,12 @@ class ADAMTUI:
         if key == 'model':
             self._edit_settings(stdscr, 'model')
             return
+        elif key == 'vocabulary':
+            self._edit_settings(stdscr, 'model')  # Vocabulary settings are in model config
+            return
+        elif key == 'venn':
+            self._edit_settings(stdscr, 'model')  # Venn settings are in model config
+            return
         elif key == 'training':
             self._edit_settings(stdscr, 'training')
             return
@@ -487,8 +501,7 @@ class ADAMTUI:
             self._edit_settings(stdscr, 'performance')
             return
         elif key == 'vocab_opt':
-            self.current_menu = 'vocab_opt'
-            self.selected_item = 0
+            self._edit_settings(stdscr, 'vocab_optimization')  # Use _edit_settings instead of menu navigation
             return
         elif key == 'save':
             self._save_settings()
