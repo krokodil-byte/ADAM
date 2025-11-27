@@ -823,21 +823,24 @@ class WikipediaStreamTrainer:
             if processed_count[0] <= len(article_info):
                 idx = processed_count[0] - 1
                 title, article_num = article_info[idx]
+
+                # Progress update (only show for actual articles, not internal chunks)
+                if verbose and processed_count[0] % 10 == 0:
+                    stats = self.brain.get_stats()
+                    self.logger.article_progress(
+                        processed_count[0], title, tokens, stats['loss'], stats['vocab_words']
+                    )
             else:
-                # More batches than articles - show batch progress instead
+                # More batches than articles - pipeline is chunking internally
+                # Use last article info for validation/save checks
                 idx = len(article_info) - 1
                 _, article_num = article_info[idx]
-                title = f"Batch {processed_count[0]}/{total_batches}"
+                title = f"(internal chunk {processed_count[0] - len(article_info)})"
+                # Don't log these - they're just internal pipeline chunks
 
-            # Progress update
-            if verbose and processed_count[0] % 10 == 0:
-                stats = self.brain.get_stats()
-                self.logger.article_progress(
-                    processed_count[0], title, tokens, stats['loss'], stats['vocab_words']
-                )
-
-            # Validation check (only if validate_per_pass is False)
-            if (enable_validation and self.val_articles and
+            # Validation check (only for actual articles, not internal chunks)
+            if (processed_count[0] <= len(article_info) and
+                enable_validation and self.val_articles and
                 not self.validate_per_pass and
                 article_num % self.validation_frequency == 0):
                 if verbose:
@@ -848,8 +851,10 @@ class WikipediaStreamTrainer:
                     self.logger.validation_result(val_loss, self.best_val_loss, improved)
                     self.logger.validation_complete()
 
-            # Auto-save check
-            if article_num % auto_save_every == 0 and article_num > last_save_article[0]:
+            # Auto-save check (only for actual articles, not internal chunks)
+            if (processed_count[0] <= len(article_info) and
+                article_num % auto_save_every == 0 and
+                article_num > last_save_article[0]):
                 last_save_article[0] = article_num
                 ckpt_name = f"wiki_stream_{article_num}.ckpt"
                 ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
@@ -871,12 +876,12 @@ class WikipediaStreamTrainer:
         # Run pipelined training
         batch_tokens = trainer.train_texts(iter(texts), progress_callback)
 
-        # Clear pass completion message
+        # Pass completion message
         if verbose:
             stats = self.brain.get_stats()
-            print(f"\n{'='*70}")
-            print(f"✅ PASS {pass_num} COMPLETE - Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']} words")
-            print(f"{'='*70}\n")
+            self.logger.info("=" * 70)
+            self.logger.info(f"✅ PASS {pass_num} COMPLETE - Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']} words")
+            self.logger.info("=" * 70)
 
         # Validate at end of pass (if validate_per_pass is True)
         if enable_validation and self.val_articles and self.validate_per_pass:
