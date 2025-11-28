@@ -14,7 +14,7 @@ A.D.A.M is an experimental language model featuring:
 
 - **🔥 Hot/Cold Vocabulary Architecture** - Unlimited RAM vocabulary with GPU-cached hot words (LRU)
 - **📖 Vocabulary Pre-Training** - Scan datasets first for stable vocabulary before training
-- **⚡ Extreme GPU Optimization** - cuBLAS GEMM, fused kernels, pipelined training (50-100x speedup)
+- **⚡ Extreme GPU Optimization** - cuBLAS GEMM, fused kernels, pipelined training
 - **🧩 Venn Semantic System** - Multi-head semantic clustering for generalization beyond memorization
 - **🌊 Continuous Learning** - Train indefinitely on new data, vocabulary grows automatically
 - **🎯 Production-Ready** - Validation, early stopping, checkpointing, hot-reload
