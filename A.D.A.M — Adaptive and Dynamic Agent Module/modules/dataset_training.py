@@ -494,7 +494,8 @@ class HFDatasetTrainer:
               verbose: bool = True,
               prefetch_size: int = 3,
               enable_validation: bool = True,
-              enable_early_stopping: bool = True) -> Dict:
+              enable_early_stopping: bool = True,
+              vocab_passes: int = 0) -> Dict:
         """
         Train on HuggingFace dataset.
 
@@ -506,12 +507,43 @@ class HFDatasetTrainer:
             prefetch_size: Number of batches to prefetch (if use_pipeline)
             enable_validation: Run validation during training
             enable_early_stopping: Stop if validation doesn't improve
+            vocab_passes: Number of vocabulary scanning passes before training (0 = disabled).
+                         These passes scan the dataset to build vocabulary without training.
 
         Returns:
             Final statistics
         """
         if auto_save_every is None:
             auto_save_every = TRAINING_CONFIG.AUTO_SAVE_FREQUENCY
+
+        # Vocabulary pre-training passes
+        if vocab_passes > 0:
+            if verbose:
+                self.logger.info(f"\n{'='*70}")
+                self.logger.info(f"📖 VOCABULARY SCANNING - {vocab_passes} pass(es)")
+                self.logger.info(f"{'='*70}")
+
+            for vpass in range(1, vocab_passes + 1):
+                if verbose:
+                    self.logger.info(f"\n🔍 Vocabulary scan pass {vpass}/{vocab_passes}")
+
+                # Scan all training samples for vocabulary (no training)
+                for idx, sample in enumerate(self.train_samples):
+                    if verbose and (idx + 1) % 100 == 0:
+                        self.logger.info(f"   Scanned {idx+1}/{len(self.train_samples)} samples")
+
+                    # Encode with vocab_scan_only flag (no GPU sync)
+                    self.brain.encode_text(sample, vocab_scan_only=True)
+
+                if verbose:
+                    vocab_size = len(self.brain.vocab.word_to_id)
+                    self.logger.info(f"   ✓ Pass {vpass} complete - {vocab_size} words discovered")
+
+            # Finalize vocabulary after all scan passes
+            self.brain.finalize_vocabulary_from_scan(verbose=verbose)
+
+            if verbose:
+                self.logger.info(f"{'='*70}\n")
 
         dataset_stats = self.loader.get_stats()
         train_samples_count = len(self.train_samples)
@@ -825,7 +857,8 @@ class DatasetTrainer:
               verbose: bool = True,
               use_pipeline: bool = True,
               enable_validation: bool = True,
-              enable_early_stopping: bool = True) -> dict:
+              enable_early_stopping: bool = True,
+              vocab_passes: int = 0) -> dict:
         """
         Train su intero dataset.
 
@@ -837,10 +870,45 @@ class DatasetTrainer:
             use_pipeline: DEPRECATED - pipelined training is now always used
             enable_validation: Run validation during training
             enable_early_stopping: Stop if validation doesn't improve
+            vocab_passes: Number of vocabulary scanning passes before training (0 = disabled).
+                         These passes scan the dataset to build vocabulary without training.
 
         Returns:
             Dict con statistiche finali
         """
+        # Vocabulary pre-training passes
+        if vocab_passes > 0:
+            if verbose:
+                self.logger.info(f"\n{'='*70}")
+                self.logger.info(f"📖 VOCABULARY SCANNING - {vocab_passes} pass(es)")
+                self.logger.info(f"{'='*70}")
+
+            for vpass in range(1, vocab_passes + 1):
+                if verbose:
+                    self.logger.info(f"\n🔍 Vocabulary scan pass {vpass}/{vocab_passes}")
+
+                # Scan all training files for vocabulary (no training)
+                for file_idx, filepath in enumerate(self.train_files, 1):
+                    content = self.loader.load_file(filepath)
+                    if not content:
+                        continue
+
+                    if verbose and file_idx % 10 == 0:
+                        self.logger.info(f"   Scanned {file_idx}/{len(self.train_files)} files")
+
+                    # Encode with vocab_scan_only flag (no GPU sync)
+                    self.brain.encode_text(content, vocab_scan_only=True)
+
+                if verbose:
+                    vocab_size = len(self.brain.vocab.word_to_id)
+                    self.logger.info(f"   ✓ Pass {vpass} complete - {vocab_size} words discovered")
+
+            # Finalize vocabulary after all scan passes
+            self.brain.finalize_vocabulary_from_scan(verbose=verbose)
+
+            if verbose:
+                self.logger.info(f"{'='*70}\n")
+
         dataset_stats = self.loader.get_stats()
         train_files_count = len(self.train_files)
 

@@ -493,10 +493,18 @@ class VectLLMBrain:
             'cluster_update_lr': config_array[6]
         }
 
-    def encode_text(self, text: str) -> List[int]:
+    def encode_text(self, text: str, vocab_scan_only: bool = False) -> List[int]:
         """
         Encode text usando vocabolario dinamico.
         NOW with usage tracking for LRU cache management.
+
+        Args:
+            text: Text to encode
+            vocab_scan_only: If True, only scan for vocabulary (don't sync to GPU).
+                           Use this for vocabulary pre-training passes.
+
+        Returns:
+            List of token IDs
         """
         old_vocab_size = len(self.vocab.word_to_id)
         tokens = self.vocab.encode(text)
@@ -519,8 +527,8 @@ class VectLLMBrain:
                         token_id not in self._hot_vocab_ids):
                         words_to_promote.append((token_id, word))
 
-        # Se vocabolario è cresciuto, sincronizza con kernel
-        if new_vocab_size > old_vocab_size:
+        # Se vocabolario è cresciuto, sincronizza con kernel (unless vocab_scan_only)
+        if new_vocab_size > old_vocab_size and not vocab_scan_only:
             # CRITICAL FIX: Always add new words to COLD vocab immediately
             # This ensures _preload_tokens_to_hot() can find them later
             # Only the HOT (GPU) loading is deferred, not COLD (RAM) initialization
@@ -535,12 +543,76 @@ class VectLLMBrain:
                 # Sync immediately (cold already done, now load to hot)
                 self._load_new_words_to_hot(old_vocab_size, new_vocab_size)
 
-        # Promote existing words to HOT if they reached threshold
-        if words_to_promote and not self._defer_sync_depth:
+        # Promote existing words to HOT if they reached threshold (unless vocab_scan_only)
+        if words_to_promote and not self._defer_sync_depth and not vocab_scan_only:
             char_embeddings = self._get_char_embeddings_cached()
             self._batch_load_to_hot(words_to_promote, char_embeddings)
 
         return tokens
+
+    def finalize_vocabulary_from_scan(self, verbose: bool = True):
+        """
+        Finalize vocabulary after scan passes.
+        Loads top N most frequent words to HOT vocab (GPU).
+
+        This should be called after vocabulary scanning passes and before actual training.
+
+        Args:
+            verbose: Print progress information
+        """
+        if not self.initialized:
+            return
+
+        total_words = len(self.vocab.word_to_id)
+        if total_words == 0:
+            if verbose:
+                print("   No words to finalize")
+            return
+
+        if verbose:
+            print(f"\n📚 Finalizing vocabulary from scan...")
+            print(f"   Total words discovered: {total_words}")
+
+        # Get all words sorted by frequency
+        word_freq_list = []
+        for word, word_id in self.vocab.word_to_id.items():
+            if word_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
+                freq = self.vocab.word_frequency.get(word, 0)
+                word_freq_list.append((word_id, word, freq))
+
+        # Sort by frequency (descending)
+        word_freq_list.sort(key=lambda x: x[2], reverse=True)
+
+        # Load top N to hot vocab (respecting MAX_HOT_VOCAB)
+        max_hot = VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB
+        words_to_hot = word_freq_list[:max_hot]
+
+        if verbose:
+            print(f"   Loading top {len(words_to_hot)} words to HOT vocab (GPU)...")
+
+        # Initialize cold vocab for all words
+        char_embeddings = self._get_char_embeddings_cached()
+        for word_id, word, freq in word_freq_list:
+            if word_id not in self._cold_vocab:
+                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+                self._cold_vocab[word_id] = init_emb.copy()
+                self._word_usage_count[word_id] = freq
+
+        # Batch load to hot
+        if words_to_hot:
+            words_for_hot = [(wid, word) for wid, word, _ in words_to_hot]
+            self._batch_load_to_hot(words_for_hot, char_embeddings)
+
+        cold_size = len(self._cold_vocab)
+        hot_size = len(self._hot_vocab_ids)
+
+        if verbose:
+            print(f"   ✅ Vocabulary finalized:")
+            print(f"      - Cold vocab: {cold_size} words (all in RAM)")
+            print(f"      - Hot vocab: {hot_size}/{max_hot} words (in GPU)")
+            if words_to_hot:
+                top_5 = words_to_hot[:5]
+                print(f"      - Top 5 words: {', '.join([f'{word}({freq})' for _, word, freq in top_5])}")
 
     def begin_validation(self):
         """Start validation mode - defer GPU syncs to avoid contention."""

@@ -405,7 +405,8 @@ def cmd_dataset(args):
                 auto_save_every=args.auto_save or 1000,
                 verbose=True,
                 enable_validation=args.validation,
-                enable_early_stopping=args.early_stopping
+                enable_early_stopping=args.early_stopping,
+                vocab_passes=args.vocab_passes
             )
         else:
             # Plain text directory/file
@@ -426,7 +427,8 @@ def cmd_dataset(args):
                 auto_save_every=args.auto_save,
                 verbose=True,
                 enable_validation=args.validation,
-                enable_early_stopping=args.early_stopping
+                enable_early_stopping=args.early_stopping,
+                vocab_passes=args.vocab_passes
             )
 
         # Save final
@@ -495,7 +497,8 @@ def cmd_wikipedia(args):
                 auto_save_every=args.auto_save or 100,
                 verbose=True,
                 enable_validation=args.validation,
-                enable_early_stopping=args.early_stopping
+                enable_early_stopping=args.early_stopping,
+                vocab_passes=args.vocab_passes
             )
         else:
             # Use dump file
@@ -628,6 +631,9 @@ def main():
                                help='Stop when validation stops improving')
     parser_dataset.add_argument('--val-split', type=float, dest='val_split', default=0.1,
                                help='Validation split fraction (default: 0.1)')
+    # Vocabulary pre-training
+    parser_dataset.add_argument('--vocab-passes', type=int, default=0, dest='vocab_passes',
+                               help='Number of vocabulary scanning passes before training (default: 0 = disabled)')
     # Vocab optimization options
     parser_dataset.add_argument('--no-vocab-opt', action='store_true', dest='no_vocab_opt',
                                help='Disable vocab optimization')
@@ -657,6 +663,9 @@ def main():
                             help='Stop when validation stops improving')
     parser_wiki.add_argument('--val-articles', type=int, dest='val_articles', default=10,
                             help='Number of articles for validation (default: 10)')
+    # Vocabulary pre-training
+    parser_wiki.add_argument('--vocab-passes', type=int, default=0, dest='vocab_passes',
+                            help='Number of vocabulary scanning passes before training (default: 0 = disabled)')
     parser_wiki.add_argument('--validate-per-pass', action='store_true', dest='validate_per_pass',
                             default=True, help='Validate at end of each pass (default)')
     parser_wiki.add_argument('--no-validate-per-pass', action='store_false', dest='validate_per_pass',
