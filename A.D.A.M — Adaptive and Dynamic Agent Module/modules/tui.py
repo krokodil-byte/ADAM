@@ -136,6 +136,15 @@ class ADAMTUI:
                     ('back', '← Back', 'Return to main menu'),
                 ]
             },
+            'chat': {
+                'title': 'Interactive Chat',
+                'items': [
+                    ('checkpoint', '📦 Load Checkpoint', 'Select checkpoint to chat with'),
+                    ('preset', '⚡ Preset', 'Configuration preset (e.g. inference)'),
+                    ('run', '▶️  Start Chat', 'Begin interactive chat'),
+                    ('back', '← Back', 'Return to main menu'),
+                ]
+            },
             'settings': {
                 'title': 'Settings',
                 'items': [
@@ -519,8 +528,6 @@ class ADAMTUI:
             self._run_command(stdscr, 'init')
         elif key == 'reset_kernel':
             self._reset_kernel(stdscr)
-        elif key == 'chat':
-            self._run_command(stdscr, 'chat')
         elif key == 'stats':
             self._run_command(stdscr, 'stats')
 
@@ -675,6 +682,8 @@ class ADAMTUI:
                 self._run_wikipedia(stdscr)
             elif self.current_menu == 'dataset':
                 self._run_dataset(stdscr)
+            elif self.current_menu == 'chat':
+                self._run_command(stdscr, 'chat')
 
     def _input_dialog(self, stdscr, title: str, default: str = "") -> Optional[str]:
         """Show input dialog"""
