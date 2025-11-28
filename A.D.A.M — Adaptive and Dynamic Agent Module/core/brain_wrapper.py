@@ -503,9 +503,21 @@ class VectLLMBrain:
         new_vocab_size = len(self.vocab.word_to_id)
 
         # Track usage for LRU (only for word tokens, not chars)
+        # Also collect words that reached threshold and need HOT promotion
+        words_to_promote = []
         for token_id in tokens:
             if token_id >= MODEL_CONFIG.CHAR_VOCAB_SIZE:
                 self._word_usage_count[token_id] = self._word_usage_count.get(token_id, 0) + 1
+
+                # Check if word just reached threshold and needs HOT promotion
+                if token_id in self.vocab.id_to_word:
+                    word = self.vocab.id_to_word[token_id]
+                    word_freq = self.vocab.word_frequency.get(word, 0)
+
+                    # Promote to HOT if threshold reached and not already in HOT
+                    if (word_freq >= MODEL_CONFIG.WORD_CREATION_THRESHOLD and
+                        token_id not in self._hot_vocab_ids):
+                        words_to_promote.append((token_id, word))
 
         # Se vocabolario è cresciuto, sincronizza con kernel
         if new_vocab_size > old_vocab_size:
@@ -522,6 +534,11 @@ class VectLLMBrain:
             else:
                 # Sync immediately (cold already done, now load to hot)
                 self._load_new_words_to_hot(old_vocab_size, new_vocab_size)
+
+        # Promote existing words to HOT if they reached threshold
+        if words_to_promote and not self._defer_sync_depth:
+            char_embeddings = self._get_char_embeddings_cached()
+            self._batch_load_to_hot(words_to_promote, char_embeddings)
 
         return tokens
 
@@ -661,8 +678,15 @@ class VectLLMBrain:
         char_embeddings = self._get_char_embeddings_cached()
 
         # Decide which words to load into HOT (LRU cache)
+        # CRITICAL: Apply WORD_CREATION_THRESHOLD here for HOT vocab promotion
         words_to_hot = []
         for word_id, word in new_words:
+            # Check frequency threshold for HOT vocab promotion
+            word_freq = self.vocab.word_frequency.get(word, 0)
+            if word_freq < MODEL_CONFIG.WORD_CREATION_THRESHOLD:
+                # Word not used enough yet - stay in COLD only
+                continue
+
             # Check if hot vocab has space
             hot_vocab_size = len(self._hot_vocab_ids)
 
@@ -743,8 +767,15 @@ class VectLLMBrain:
                 self._word_usage_count[word_id] += 1
 
         # STEP 2: Decide which words to load into HOT (LRU cache)
+        # CRITICAL: Apply WORD_CREATION_THRESHOLD here for HOT vocab promotion
         words_to_hot = []
         for word_id, word in new_words:
+            # Check frequency threshold for HOT vocab promotion
+            word_freq = self.vocab.word_frequency.get(word, 0)
+            if word_freq < MODEL_CONFIG.WORD_CREATION_THRESHOLD:
+                # Word not used enough yet - stay in COLD only
+                continue
+
             # Check if hot vocab has space
             hot_vocab_size = len(self._hot_vocab_ids)
 
