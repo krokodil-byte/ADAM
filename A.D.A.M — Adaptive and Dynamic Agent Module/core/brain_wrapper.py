@@ -1481,12 +1481,13 @@ class VectLLMBrain:
     # HOT/COLD VOCABULARY MANAGEMENT
     # =========================================================================
 
-    def save_cold_vocab(self, filepath: str) -> bool:
+    def save_cold_vocab(self, filepath: str, compress: bool = None) -> bool:
         """
         Save cold vocab embeddings to disk for persistence.
 
         Args:
             filepath: Path for cold vocab file (e.g., "model.cold")
+            compress: Whether to compress (default: from VOCAB_OPTIMIZATION_CONFIG)
 
         Returns:
             True if successful
@@ -1494,16 +1495,32 @@ class VectLLMBrain:
         if not self._cold_vocab:
             return True  # Nothing to save
 
+        if compress is None:
+            compress = VOCAB_OPTIMIZATION_CONFIG.COLD_VOCAB_COMPRESSION
+
         try:
-            # Save as numpy compressed archive
+            import time
+            start_time = time.time()
+
+            # Prepare data arrays
             save_dict = {
                 'word_ids': np.array(list(self._cold_vocab.keys()), dtype=np.int32),
                 'embeddings': np.array(list(self._cold_vocab.values()), dtype=np.float32),
                 'usage_counts': np.array([self._word_usage_count.get(k, 0) for k in self._cold_vocab.keys()], dtype=np.int32)
             }
-            np.savez_compressed(filepath, **save_dict)
+
+            # Save (compressed or uncompressed based on config)
+            # OPTIMIZATION: Uncompressed is MUCH faster (10-100x) but ~3x larger file
+            if compress:
+                np.savez_compressed(filepath, **save_dict)
+            else:
+                np.savez(filepath, **save_dict)
+
+            elapsed = time.time() - start_time
             self._cold_vocab_path = Path(filepath)
-            print(f"   💾 Saved cold vocab: {len(self._cold_vocab)} words")
+
+            comp_str = "(compressed)" if compress else "(uncompressed)"
+            print(f"   💾 Saved cold vocab: {len(self._cold_vocab)} words {comp_str} in {elapsed:.2f}s")
             return True
         except Exception as e:
             print(f"   ❌ Failed to save cold vocab: {e}")
