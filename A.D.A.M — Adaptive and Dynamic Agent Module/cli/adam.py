@@ -366,10 +366,6 @@ def cmd_dataset(args):
     if args.preset:
         set_config_from_preset(args.preset)
 
-    # Apply vocab optimization settings
-    if hasattr(args, 'no_vocab_opt') and args.no_vocab_opt:
-        VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION = False
-
     # Detect dataset type: HuggingFace (JSONL/Parquet/CSV) or plain text
     is_hf_format = dataset_path.suffix.lower() in ['.jsonl', '.json', '.parquet', '.csv', '.tsv']
 
@@ -451,10 +447,6 @@ def cmd_wikipedia(args):
     # Apply preset if specified
     if args.preset:
         set_config_from_preset(args.preset)
-
-    # Apply vocab optimization settings
-    if hasattr(args, 'no_vocab_opt') and args.no_vocab_opt:
-        VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION = False
 
     # Create brain
     brain = VectLLMBrain()

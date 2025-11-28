@@ -177,7 +177,7 @@ class VectLLMBrain:
             vocab = DynamicVocabulary(
                 embed_dim=MODEL_CONFIG.EMBED_DIM,
                 char_vocab_size=MODEL_CONFIG.CHAR_VOCAB_SIZE,
-                # max_word_vocab_size uses default (100000) - cold vocab is unlimited anyway
+                max_word_vocab_size=MODEL_CONFIG.MAX_WORD_VOCAB_SIZE,  # CRITICAL: Must match CUDA's MAX_WORD_VOCAB_SIZE
                 creation_threshold=MODEL_CONFIG.WORD_CREATION_THRESHOLD,
                 pruning_threshold=MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
                 max_word_length=MODEL_CONFIG.MAX_WORD_LENGTH
@@ -667,11 +667,6 @@ class VectLLMBrain:
         if not self.initialized:
             return
 
-        if not VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION:
-            # Fallback to legacy
-            self._sync_new_words_legacy(old_size, new_size)
-            return
-
         start_time = time.time()
 
         # Collect new words
@@ -743,11 +738,6 @@ class VectLLMBrain:
         OPTIMIZED: Uses caching, direct word lookup, and batch operations.
         """
         if not self.initialized:
-            return
-
-        if not VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION:
-            # Fallback to original behavior
-            self._sync_new_words_legacy(old_size, new_size)
             return
 
         start_time = time.time()
@@ -915,27 +905,6 @@ class VectLLMBrain:
         for word_id, _ in words_to_load:
             self._hot_vocab_ids.add(word_id)
 
-    def _sync_new_words_legacy(self, old_size: int, new_size: int):
-        """Legacy sync method for fallback."""
-        char_embeddings = np.zeros((MODEL_CONFIG.CHAR_VOCAB_SIZE, MODEL_CONFIG.EMBED_DIM), dtype=np.float32)
-        for char_id in range(MODEL_CONFIG.CHAR_VOCAB_SIZE):
-            emb_buffer = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)()
-            result = self.lib.get_word_embedding(char_id, emb_buffer)
-            if result == 0:
-                char_embeddings[char_id] = np.array(emb_buffer)
-
-        activated = 0
-        for word, word_id in self.vocab.word_to_id.items():
-            if word_id >= old_size and word_id < new_size:
-                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
-                emb_array = (ctypes.c_float * MODEL_CONFIG.EMBED_DIM)(*init_emb)
-                result = self.lib.activate_word_token(word_id, emb_array)
-                if result == 0:
-                    activated += 1
-
-        if activated > 0:
-            print(f"   🔄 Synced {activated} new words to GPU")
-    
     def sync_vocabulary(self):
         """
         Sincronizza completamente vocabolario Python → CUDA.

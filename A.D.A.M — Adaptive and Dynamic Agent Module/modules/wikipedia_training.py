@@ -596,8 +596,8 @@ class WikipediaStreamTrainer:
             passes_per_batch: Passate training per ogni batch
             auto_save_every: Auto-save ogni N articoli (default: from TRAINING_CONFIG)
             verbose: Stampa progress
-            use_pipeline: Usa training pipelinato per overlap CPU/GPU
-            prefetch_size: Numero batch da pre-caricare (se use_pipeline)
+            use_pipeline: DEPRECATED - pipelined training is now always used
+            prefetch_size: Numero batch da pre-caricare
             enable_validation: Run validation during training
             enable_early_stopping: Stop if validation doesn't improve
 
@@ -663,59 +663,16 @@ class WikipediaStreamTrainer:
                     if verbose:
                         self.logger.pass_start(pass_num, passes_per_batch)
 
-                    if use_pipeline:
-                        # Pipelined training - overlap CPU encoding with GPU training
-                        batch_tokens += self._train_batch_pipelined(
-                            fetched, pass_num, max_articles, articles_processed,
-                            auto_save_every, verbose, prefetch_size,
-                            enable_validation, enable_early_stopping
-                        )
-                        if pass_num == 1:
-                            articles_processed += fetched
-                            if max_articles:
-                                articles_processed = min(articles_processed, max_articles)
-                    else:
-                        # Sequential training (legacy)
-                        for i, (title, text) in enumerate(self.fetcher.iter_articles()):
-                            article_num = articles_processed + i + 1
-
-                            # Check limit
-                            if max_articles and article_num > max_articles:
-                                break
-
-                            # Train
-                            processed = self.brain.train_on_text(text, passes=1)
-                            batch_tokens += processed
-                            total_tokens += processed  # Update total immediately
-
-                            if pass_num == 1:
-                                articles_processed += 1
-
-                            # Progress update
-                            if verbose and i % 10 == 0:
-                                stats = self.brain.get_stats()
-                                self.logger.article_progress(
-                                    i+1, title, processed, stats['loss'], stats['vocab_words']
-                                )
-
-                            # Auto-save
-                            if article_num % auto_save_every == 0:
-                                ckpt_name = f"wiki_stream_{article_num}.ckpt"
-                                ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
-
-                                if verbose:
-                                    self.logger.checkpoint_save(ckpt_name)
-
-                                self.brain.save_checkpoint(str(ckpt_path))
-
-                            # Update stats after each article for accurate interrupt reporting
-                            brain_stats = self.brain.get_stats()
-                            self.stats.update(
-                                cycles=brain_stats['cycles'],
-                                tokens=brain_stats['tokens'],
-                                loss=brain_stats['loss'],
-                                vocab_size=brain_stats['vocab_words']
-                            )
+                    # Pipelined training - overlap CPU encoding with GPU training
+                    batch_tokens += self._train_batch_pipelined(
+                        fetched, pass_num, max_articles, articles_processed,
+                        auto_save_every, verbose, prefetch_size,
+                        enable_validation, enable_early_stopping
+                    )
+                    if pass_num == 1:
+                        articles_processed += fetched
+                        if max_articles:
+                            articles_processed = min(articles_processed, max_articles)
 
                 total_tokens += batch_tokens
                 batch_time = time.time() - batch_start
