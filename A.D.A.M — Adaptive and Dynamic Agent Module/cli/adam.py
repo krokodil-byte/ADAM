@@ -23,7 +23,7 @@ try:
     from core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG,
         VOCAB_OPTIMIZATION_CONFIG,
-        set_config_from_preset
+        set_config_from_preset, load_tui_settings
     )
     from core.stats import StatsCollector
     from Utils.checkpoint import CheckpointManager
@@ -38,7 +38,7 @@ except ImportError:
     from ..core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG,
         VOCAB_OPTIMIZATION_CONFIG,
-        set_config_from_preset
+        set_config_from_preset, load_tui_settings
     )
     from ..core.stats import StatsCollector
     from ..Utils.checkpoint import CheckpointManager
@@ -96,8 +96,11 @@ def cmd_train(args):
     print(f"📖 Loading text from: {input_file}")
     text = input_file.read_text()
     print(f"   Size: {len(text):,} chars")
-    
-    # Apply preset if specified
+
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
+    # Apply preset if specified (can override TUI settings)
     if args.preset:
         set_config_from_preset(args.preset)
         print(f"   Config: {args.preset} preset")
@@ -318,6 +321,9 @@ def cmd_chat(args):
     """Interactive chat mode"""
     print("💬 Starting interactive chat...")
 
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
     # Create brain
     brain = VectLLMBrain()
 
@@ -362,7 +368,10 @@ def cmd_dataset(args):
         print(f"❌ Dataset path not found: {dataset_path}")
         return 1
 
-    # Apply preset if specified
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
+    # Apply preset if specified (can override TUI settings)
     if args.preset:
         set_config_from_preset(args.preset)
 
@@ -405,7 +414,8 @@ def cmd_dataset(args):
                 auto_save_every=args.auto_save or 1000,
                 verbose=True,
                 enable_validation=args.validation,
-                enable_early_stopping=args.early_stopping
+                enable_early_stopping=args.early_stopping,
+                vocab_passes=args.vocab_passes
             )
         else:
             # Plain text directory/file
@@ -426,7 +436,8 @@ def cmd_dataset(args):
                 auto_save_every=args.auto_save,
                 verbose=True,
                 enable_validation=args.validation,
-                enable_early_stopping=args.early_stopping
+                enable_early_stopping=args.early_stopping,
+                vocab_passes=args.vocab_passes
             )
 
         # Save final
@@ -444,7 +455,10 @@ def cmd_wikipedia(args):
     """Train on Wikipedia dump or API"""
     print("📚 Wikipedia training")
 
-    # Apply preset if specified
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
+    # Apply preset if specified (can override TUI settings)
     if args.preset:
         set_config_from_preset(args.preset)
 
@@ -495,7 +509,8 @@ def cmd_wikipedia(args):
                 auto_save_every=args.auto_save or 100,
                 verbose=True,
                 enable_validation=args.validation,
-                enable_early_stopping=args.early_stopping
+                enable_early_stopping=args.early_stopping,
+                vocab_passes=args.vocab_passes
             )
         else:
             # Use dump file
@@ -628,6 +643,9 @@ def main():
                                help='Stop when validation stops improving')
     parser_dataset.add_argument('--val-split', type=float, dest='val_split', default=0.1,
                                help='Validation split fraction (default: 0.1)')
+    # Vocabulary pre-training
+    parser_dataset.add_argument('--vocab-passes', type=int, default=0, dest='vocab_passes',
+                               help='Number of vocabulary scanning passes before training (default: 0 = disabled)')
     # Vocab optimization options
     parser_dataset.add_argument('--no-vocab-opt', action='store_true', dest='no_vocab_opt',
                                help='Disable vocab optimization')
@@ -657,6 +675,9 @@ def main():
                             help='Stop when validation stops improving')
     parser_wiki.add_argument('--val-articles', type=int, dest='val_articles', default=10,
                             help='Number of articles for validation (default: 10)')
+    # Vocabulary pre-training
+    parser_wiki.add_argument('--vocab-passes', type=int, default=0, dest='vocab_passes',
+                            help='Number of vocabulary scanning passes before training (default: 0 = disabled)')
     parser_wiki.add_argument('--validate-per-pass', action='store_true', dest='validate_per_pass',
                             default=True, help='Validate at end of each pass (default)')
     parser_wiki.add_argument('--no-validate-per-pass', action='store_false', dest='validate_per_pass',

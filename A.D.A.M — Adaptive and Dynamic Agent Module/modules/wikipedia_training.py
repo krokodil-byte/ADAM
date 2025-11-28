@@ -581,7 +581,8 @@ class WikipediaStreamTrainer:
               use_pipeline: bool = True,
               prefetch_size: int = 3,
               enable_validation: bool = True,
-              enable_early_stopping: bool = True) -> dict:
+              enable_early_stopping: bool = True,
+              vocab_passes: int = 0) -> dict:
         """
         Train continuously on Wikipedia articles.
 
@@ -600,12 +601,53 @@ class WikipediaStreamTrainer:
             prefetch_size: Numero batch da pre-caricare
             enable_validation: Run validation during training
             enable_early_stopping: Stop if validation doesn't improve
+            vocab_passes: Number of vocabulary scanning passes before training (0 = disabled).
+                         These passes scan the dataset to build vocabulary without training.
 
         Returns:
             Dict con statistiche finali
         """
         if auto_save_every is None:
             auto_save_every = TRAINING_CONFIG.AUTO_SAVE_FREQUENCY
+
+        # Vocabulary pre-training passes
+        if vocab_passes > 0:
+            if verbose:
+                self.logger.info(f"\n{'='*70}")
+                self.logger.info(f"📖 VOCABULARY SCANNING - {vocab_passes} pass(es)")
+                self.logger.info(f"{'='*70}")
+
+            for vpass in range(1, vocab_passes + 1):
+                if verbose:
+                    self.logger.info(f"\n🔍 Vocabulary scan pass {vpass}/{vocab_passes}")
+
+                # Fetch batch for vocab scanning
+                fetched = self.fetcher.fetch_batch()
+
+                if fetched == 0:
+                    self.logger.warning("No articles fetched for vocab scan")
+                    continue
+
+                # Scan articles for vocabulary (no training)
+                for i, (title, text) in enumerate(self.fetcher.iter_articles()):
+                    if verbose and (i + 1) % 10 == 0:
+                        self.logger.info(f"   Scanned {i+1}/{fetched} articles")
+
+                    # Encode with vocab_scan_only flag (no GPU sync)
+                    self.brain.encode_text(text, vocab_scan_only=True)
+
+                # Clear buffer after each scan pass
+                self.fetcher.clear_buffer()
+
+                if verbose:
+                    vocab_size = len(self.brain.vocab.word_to_id)
+                    self.logger.info(f"   ✓ Pass {vpass} complete - {vocab_size} words discovered")
+
+            # Finalize vocabulary after all scan passes
+            self.brain.finalize_vocabulary_from_scan(verbose=verbose)
+
+            if verbose:
+                self.logger.info(f"{'='*70}\n")
 
         # Fetch validation articles first
         if enable_validation and not self.val_articles:

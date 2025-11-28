@@ -419,10 +419,107 @@ def _merge_config(target_config, preset_config):
             setattr(target_config, key, getattr(preset_config, key))
 
 
+def load_tui_settings():
+    """
+    Load settings from TUI file and apply to global config objects.
+    This ensures the model uses the settings configured in the TUI.
+
+    Returns:
+        bool: True if settings were loaded, False otherwise
+    """
+    import json
+    from pathlib import Path
+
+    global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG
+
+    tui_settings_file = Path.home() / ".adam" / "tui_settings.json"
+
+    if not tui_settings_file.exists():
+        return False
+
+    try:
+        with open(tui_settings_file, 'r') as f:
+            data = json.load(f)
+
+        # Extract settings (handle both old and new format)
+        settings = data.get('settings', data)
+
+        if not settings:
+            return False
+
+        loaded_count = 0
+
+        # Apply MODEL settings
+        if 'model' in settings:
+            for key, value in settings['model'].items():
+                if hasattr(MODEL_CONFIG, key.upper()):
+                    setattr(MODEL_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(MODEL_CONFIG, key):
+                    setattr(MODEL_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Apply TRAINING settings
+        if 'training' in settings:
+            for key, value in settings['training'].items():
+                if hasattr(TRAINING_CONFIG, key.upper()):
+                    setattr(TRAINING_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(TRAINING_CONFIG, key):
+                    setattr(TRAINING_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Apply GENERATION settings
+        if 'generation' in settings:
+            for key, value in settings['generation'].items():
+                if hasattr(GENERATION_CONFIG, key.upper()):
+                    setattr(GENERATION_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(GENERATION_CONFIG, key):
+                    setattr(GENERATION_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Apply PERFORMANCE settings
+        if 'performance' in settings:
+            for key, value in settings['performance'].items():
+                if hasattr(PERFORMANCE_CONFIG, key.upper()):
+                    setattr(PERFORMANCE_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(PERFORMANCE_CONFIG, key):
+                    setattr(PERFORMANCE_CONFIG, key, value)
+                    loaded_count += 1
+                elif hasattr(RUNTIME_CONFIG, key.upper()):
+                    setattr(RUNTIME_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(RUNTIME_CONFIG, key):
+                    setattr(RUNTIME_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Apply VOCAB_OPTIMIZATION settings
+        if 'vocab_optimization' in settings:
+            for key, value in settings['vocab_optimization'].items():
+                if hasattr(VOCAB_OPTIMIZATION_CONFIG, key.upper()):
+                    setattr(VOCAB_OPTIMIZATION_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(VOCAB_OPTIMIZATION_CONFIG, key):
+                    setattr(VOCAB_OPTIMIZATION_CONFIG, key, value)
+                    loaded_count += 1
+
+        if loaded_count > 0:
+            print(f"✓ Loaded {loaded_count} settings from TUI config")
+            return True
+
+        return False
+
+    except Exception as e:
+        print(f"⚠ Could not load TUI settings: {e}")
+        return False
+
+
 def update_config(**kwargs):
     """Aggiorna parametri runtime"""
     global TRAINING_CONFIG
-    
+
     for key, value in kwargs.items():
         if hasattr(TRAINING_CONFIG, key):
             setattr(TRAINING_CONFIG, key, value)
