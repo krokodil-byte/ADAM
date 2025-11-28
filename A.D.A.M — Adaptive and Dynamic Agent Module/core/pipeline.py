@@ -14,6 +14,7 @@ import ctypes
 import threading
 import queue
 import time
+import subprocess
 import multiprocessing as mp
 from multiprocessing import Pool, Queue as MPQueue
 from typing import List, Iterator, Optional, Callable, Any
@@ -25,6 +26,33 @@ try:
     from core.config import PERFORMANCE_CONFIG, MODEL_CONFIG
 except ImportError:
     from .config import PERFORMANCE_CONFIG, MODEL_CONFIG
+
+
+def get_gpu_utilization(gpu_id: int = 0) -> float:
+    """
+    Get current GPU utilization percentage using nvidia-smi.
+
+    Args:
+        gpu_id: GPU device ID (default: 0)
+
+    Returns:
+        GPU utilization as float (0.0 to 1.0), or 0.0 if error
+    """
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits', f'--id={gpu_id}'],
+            capture_output=True,
+            text=True,
+            timeout=1.0
+        )
+        if result.returncode == 0:
+            util_str = result.stdout.strip()
+            util_percent = float(util_str)
+            return util_percent / 100.0  # Convert to 0.0-1.0 range
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        pass
+
+    return 0.0  # Return 0 on any error
 
 
 @dataclass
@@ -566,6 +594,7 @@ class PipelinedTrainer:
     def get_stats(self) -> dict:
         """Statistiche pipeline"""
         loader_stats = self.loader.get_stats()
+        gpu_util = get_gpu_utilization(gpu_id=0)
 
         return {
             'total_batches': self.total_batches,
@@ -573,6 +602,7 @@ class PipelinedTrainer:
             'gpu_time_s': self.gpu_time,
             'avg_tokens_per_batch': self.total_tokens / max(1, self.total_batches),
             'throughput_tok_s': self.total_tokens / max(0.001, self.gpu_time),
+            'gpu_utilization': gpu_util,
             **loader_stats
         }
 
