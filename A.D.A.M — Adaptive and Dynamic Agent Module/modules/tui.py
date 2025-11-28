@@ -78,6 +78,7 @@ class ADAMTUI:
                 'title': 'A.D.A.M - Main Menu',
                 'items': [
                     ('init', '🚀 Initialize System', 'Check CUDA and compile kernels'),
+                    ('reset_kernel', '🔄 Reset Kernel', 'Force recompile CUDA kernel (after git pull)'),
                     ('train', '🧠 Train on Text', 'Train model on text file'),
                     ('wikipedia', '📚 Wikipedia Training', 'Train on Wikipedia articles'),
                     ('dataset', '📂 Dataset Training', 'Train on dataset folder'),
@@ -516,6 +517,8 @@ class ADAMTUI:
         # Actions
         if key == 'init':
             self._run_command(stdscr, 'init')
+        elif key == 'reset_kernel':
+            self._reset_kernel(stdscr)
         elif key == 'chat':
             self._run_command(stdscr, 'chat')
         elif key == 'stats':
@@ -868,6 +871,59 @@ class ADAMTUI:
         elif cmd == 'stats':
             ckpt = f"-c {self.values['checkpoint']}" if self.values['checkpoint'] else ""
             os.system(f"adam stats {ckpt}")
+
+        input("\nPress Enter to continue...")
+        stdscr.clear()
+        stdscr.refresh()
+
+    def _reset_kernel(self, stdscr):
+        """Force recompile CUDA kernel (use after git pull)"""
+        curses.endwin()
+
+        print("\n🔄 RESET KERNEL - Force Recompile\n")
+        print("This will delete cached .so files and recompile the CUDA kernel.")
+        print("Use this after 'git pull' if you get kernel errors.\n")
+
+        try:
+            from pathlib import Path
+            from core.brain_wrapper import CUDACompiler
+
+            # Get kernel path
+            kernel_path = Path(__file__).parent.parent / "kernels" / "brain.cu"
+
+            if not kernel_path.exists():
+                print(f"❌ Kernel not found: {kernel_path}")
+                input("\nPress Enter to continue...")
+                stdscr.clear()
+                stdscr.refresh()
+                return
+
+            # Initialize compiler and force compile
+            print(f"📂 Kernel: {kernel_path}\n")
+            compiler = CUDACompiler()
+
+            # Remove old cached .so files
+            cache_dir = compiler.cache_dir
+            old_libs = list(cache_dir.glob("libvectllm_*.so"))
+            if old_libs:
+                print(f"🗑️  Removing {len(old_libs)} cached .so file(s)...")
+                for lib in old_libs:
+                    lib.unlink()
+                    print(f"   Deleted: {lib.name}")
+                print()
+
+            # Force recompile
+            print("🔨 Compiling kernel with force=True...\n")
+            lib_path = compiler.compile(kernel_path, force=True)
+
+            print(f"\n✅ Kernel compiled successfully!")
+            print(f"📦 Library: {lib_path.name}\n")
+            print("You can now initialize the system with the new kernel.")
+
+        except Exception as e:
+            print(f"\n❌ Reset failed: {e}")
+            import traceback
+            traceback.print_exc()
 
         input("\nPress Enter to continue...")
         stdscr.clear()
