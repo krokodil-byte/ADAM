@@ -119,29 +119,31 @@ class DynamicVocabulary:
     def _encode_word(self, word: str) -> List[int]:
         """
         Codifica una singola parola.
-        
+
+        CRITICAL: Crea word token alla PRIMA occorrenza per popolare cold vocab.
+        Il threshold viene applicato solo per promozione a HOT vocab in brain_wrapper.
+
         Returns:
             Lista di token IDs (può essere [word_id] o [char, char, ...])
         """
         # Filtra parole troppo lunghe o vuote
         if not word or len(word) > self.max_word_length:
             return self._word_to_chars(word)
-        
+
         # Check se già esiste come word token
         if word in self.word_to_id:
+            # Incrementa frequency per tracking
+            self.word_frequency[word] += 1
             return [self.word_to_id[word]]
-        
-        # Incrementa frequency
-        self.word_frequency[word] += 1
-        
-        # Se raggiunge threshold, crea word token
-        if self.word_frequency[word] >= self.creation_threshold:
-            # Controlla se abbiamo spazio
-            if self.next_word_id < self.char_vocab_size + self.max_word_vocab_size:
-                word_id = self._create_word_token(word)
-                return [word_id]
-        
-        # Altrimenti, usa caratteri
+
+        # Parola nuova - crea word token immediatamente (threshold=1 per cold vocab)
+        # Il threshold configurato verrà applicato per HOT vocab in brain_wrapper
+        if self.next_word_id < self.char_vocab_size + self.max_word_vocab_size:
+            self.word_frequency[word] = 1
+            word_id = self._create_word_token(word)
+            return [word_id]
+
+        # Nessuno spazio rimasto (max_word_vocab_size raggiunto), usa caratteri
         return self._word_to_chars(word)
     
     def _word_to_chars(self, word: str) -> List[int]:

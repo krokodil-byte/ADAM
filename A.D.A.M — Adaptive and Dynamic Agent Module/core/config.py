@@ -76,7 +76,7 @@ class VocabOptimizationConfig:
 
     # Cold vocab persistence
     SAVE_COLD_VOCAB: bool = True  # Salva cold vocab embeddings su disco
-    COLD_VOCAB_COMPRESSION: bool = True  # Usa compressione (.npz) per cold vocab
+    COLD_VOCAB_COMPRESSION: bool = False  # Usa compressione (.npz) per cold vocab (False = 10-100x più veloce ma file ~3x più grande)
     AUTO_LOAD_COLD: bool = True  # Carica automaticamente cold vocab da checkpoint
 
     # AMD Smart Access Memory (SAM) - funziona con qualsiasi CPU AMD + GPU
