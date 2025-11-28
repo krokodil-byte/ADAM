@@ -431,11 +431,11 @@ Batch 3: Encode text                       Process stats
 
 | Component | RAM | VRAM | Notes |
 |-----------|-----|------|-------|
-| Model (768d, 6L) | 200 MB | 2.5 GB | Base architecture |
+| Model (768d, 6L) | 200 MB | ~700 MB | Base architecture |
 | Cold vocab (100k words) | 300 MB | - | RAM only |
 | Hot vocab (10k words) | - | 30 MB | GPU cache |
-| Training batch (512 seq) | - | 4 GB | Activations |
-| **Total (typical)** | **~1 GB** | **~7 GB** | Comfortable for 8GB+ GPUs |
+| Training batch (512 seq) | - | 2/4 GB | Activations |
+| **Total (typical)** | **~1 GB** | **~3/5 GB** | Comfortable for 8GB+ GPUs |
 
 ---
 
@@ -703,4 +703,4 @@ See [LICENSE](LICENSE) for full details.
 
 ---
 
-**Made with ❤️ for the AI research community**
+**Made with ❤️ for the AI research community with the help of AI**
