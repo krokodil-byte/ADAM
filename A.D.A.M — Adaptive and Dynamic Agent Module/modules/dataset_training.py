@@ -492,7 +492,6 @@ class HFDatasetTrainer:
               passes: int = 1,
               auto_save_every: Optional[int] = None,
               verbose: bool = True,
-              use_pipeline: bool = True,
               prefetch_size: int = 3,
               enable_validation: bool = True,
               enable_early_stopping: bool = True) -> Dict:
@@ -542,77 +541,21 @@ class HFDatasetTrainer:
                 pass_start = time.time()
                 pass_tokens = 0
 
-                if use_pipeline:
-                    # Pipelined training - overlap CPU encoding with GPU training
-                    pass_tokens = self._train_pass_pipelined(
-                        pass_num, train_samples_count, auto_save_every, verbose, prefetch_size,
-                        enable_validation, enable_early_stopping
-                    )
-                    if pass_num == 1:
-                        samples_processed = train_samples_count
+                # Pipelined training - overlap CPU encoding with GPU training
+                pass_tokens = self._train_pass_pipelined(
+                    pass_num, train_samples_count, auto_save_every, verbose, prefetch_size,
+                    enable_validation, enable_early_stopping
+                )
+                if pass_num == 1:
+                    samples_processed = train_samples_count
 
-                    # Check early stopping
-                    if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
-                        if verbose:
-                            self.logger.validation_early_stop(self.early_stopping_patience)
-                        early_stopped = True
-                        total_tokens += pass_tokens
-                        break
-                else:
-                    # Sequential training (legacy)
-                    for idx, text in enumerate(self.train_samples):
-                        # Train on sample
-                        processed = self.brain.train_on_text(text, passes=1)
-                        pass_tokens += processed
-                        total_tokens += processed
-
-                        if pass_num == 1:
-                            samples_processed += 1
-
-                        # Progress update
-                        if verbose and (idx + 1) % 100 == 0:
-                            brain_stats = self.brain.get_stats()
-                            self.logger.sample_progress(
-                                idx + 1, train_samples_count,
-                                pass_tokens, brain_stats['loss']
-                            )
-
-                        # Validation check
-                        if enable_validation and self.val_samples and (idx + 1) % self.validation_frequency == 0:
-                            if verbose:
-                                self.logger.validation_start(len(self.val_samples))
-                            val_loss = self._run_validation()
-                            if verbose:
-                                improved = (self.validations_without_improvement == 0)
-                                self.logger.validation_result(val_loss, self.best_val_loss, improved)
-                                self.logger.validation_complete()
-
-                            # Early stopping check
-                            if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
-                                if verbose:
-                                    self.logger.validation_early_stop(self.early_stopping_patience)
-                                early_stopped = True
-                                break
-
-                        # Auto-save
-                        if (idx + 1) % auto_save_every == 0:
-                            ckpt_name = f"hf_pass{pass_num}_sample{idx + 1}.ckpt"
-                            ckpt_path = self.checkpoint_manager.get_checkpoint_path(ckpt_name)
-                            if verbose:
-                                self.logger.checkpoint_save(ckpt_name)
-                            self.brain.save_checkpoint(str(ckpt_path))
-
-                        # Update stats
-                        brain_stats = self.brain.get_stats()
-                        self.stats.update(
-                            cycles=brain_stats['cycles'],
-                            tokens=brain_stats['tokens'],
-                            loss=brain_stats['loss'],
-                            vocab_size=brain_stats['vocab_words']
-                        )
-
-                    if early_stopped:
-                        break
+                # Check early stopping
+                if enable_early_stopping and self.validations_without_improvement >= self.early_stopping_patience:
+                    if verbose:
+                        self.logger.validation_early_stop(self.early_stopping_patience)
+                    early_stopped = True
+                    total_tokens += pass_tokens
+                    break
 
                 total_tokens += pass_tokens
                 pass_time = time.time() - pass_start
@@ -880,6 +823,7 @@ class DatasetTrainer:
               auto_save_every: Optional[int] = None,
               skip_files: int = 0,
               verbose: bool = True,
+              use_pipeline: bool = True,
               enable_validation: bool = True,
               enable_early_stopping: bool = True) -> dict:
         """
@@ -890,6 +834,7 @@ class DatasetTrainer:
             auto_save_every: Auto-save ogni N file
             skip_files: Salta primi N file (per resume)
             verbose: Stampa progress
+            use_pipeline: DEPRECATED - pipelined training is now always used
             enable_validation: Run validation during training
             enable_early_stopping: Stop if validation doesn't improve
 

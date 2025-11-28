@@ -23,6 +23,7 @@ class ModelConfig:
     WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze (evita spam)
     WORD_PRUNING_THRESHOLD: int = 0  # 0 = mai pruning, cold vocab infinito (la RAM è abbondante!)
     MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
+    MAX_WORD_VOCAB_SIZE: int = 10000  # MUST match CUDA's MAX_WORD_VOCAB_SIZE (hot vocab only, cold is unlimited)
 
     # Venn Semantic System - Multi-Head Architecture
     ENABLE_VENN_MULTIHEAD: bool = True  # Enable Multi-Head Venn (revolutionary!)
@@ -375,16 +376,47 @@ RUNTIME_CONFIG = RuntimeConfig()
 VOCAB_OPTIMIZATION_CONFIG = VocabOptimizationConfig()
 
 
-def set_config_from_preset(preset_name: str):
-    """Imposta configurazione da preset"""
+def set_config_from_preset(preset_name: str, override_user_settings: bool = False):
+    """
+    Imposta configurazione da preset.
+
+    Args:
+        preset_name: Nome del preset da applicare
+        override_user_settings: Se False (default), preserva le impostazioni utente correnti.
+                                Se True, sovrascrive completamente con il preset.
+
+    IMPORTANT: By default, this function MERGES preset values with existing config.
+    This prevents presets from overriding user-configured settings.
+    """
     global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG, VOCAB_OPTIMIZATION_CONFIG
 
     preset = get_config_preset(preset_name)
-    MODEL_CONFIG = preset["model"]
-    TRAINING_CONFIG = preset["training"]
-    PERFORMANCE_CONFIG = preset["performance"]
-    if "vocab_optimization" in preset:
-        VOCAB_OPTIMIZATION_CONFIG = preset["vocab_optimization"]
+
+    if override_user_settings:
+        # Complete override - use preset values only
+        MODEL_CONFIG = preset["model"]
+        TRAINING_CONFIG = preset["training"]
+        PERFORMANCE_CONFIG = preset["performance"]
+        if "vocab_optimization" in preset:
+            VOCAB_OPTIMIZATION_CONFIG = preset["vocab_optimization"]
+    else:
+        # Merge mode - update only the fields that differ from defaults
+        # This preserves user-configured settings
+        _merge_config(MODEL_CONFIG, preset["model"])
+        _merge_config(TRAINING_CONFIG, preset["training"])
+        _merge_config(PERFORMANCE_CONFIG, preset["performance"])
+        if "vocab_optimization" in preset:
+            _merge_config(VOCAB_OPTIMIZATION_CONFIG, preset["vocab_optimization"])
+
+
+def _merge_config(target_config, preset_config):
+    """
+    Merge preset config into target config, updating only non-default values.
+    Preserves user customizations.
+    """
+    for key in preset_config.__dict__:
+        if hasattr(target_config, key):
+            setattr(target_config, key, getattr(preset_config, key))
 
 
 def update_config(**kwargs):
