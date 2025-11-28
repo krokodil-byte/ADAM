@@ -23,7 +23,7 @@ try:
     from core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG,
         VOCAB_OPTIMIZATION_CONFIG,
-        set_config_from_preset
+        set_config_from_preset, load_tui_settings
     )
     from core.stats import StatsCollector
     from Utils.checkpoint import CheckpointManager
@@ -38,7 +38,7 @@ except ImportError:
     from ..core.config import (
         MODEL_CONFIG, TRAINING_CONFIG, CHECKPOINT_CONFIG,
         VOCAB_OPTIMIZATION_CONFIG,
-        set_config_from_preset
+        set_config_from_preset, load_tui_settings
     )
     from ..core.stats import StatsCollector
     from ..Utils.checkpoint import CheckpointManager
@@ -96,8 +96,11 @@ def cmd_train(args):
     print(f"📖 Loading text from: {input_file}")
     text = input_file.read_text()
     print(f"   Size: {len(text):,} chars")
-    
-    # Apply preset if specified
+
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
+    # Apply preset if specified (can override TUI settings)
     if args.preset:
         set_config_from_preset(args.preset)
         print(f"   Config: {args.preset} preset")
@@ -318,6 +321,9 @@ def cmd_chat(args):
     """Interactive chat mode"""
     print("💬 Starting interactive chat...")
 
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
     # Create brain
     brain = VectLLMBrain()
 
@@ -362,7 +368,10 @@ def cmd_dataset(args):
         print(f"❌ Dataset path not found: {dataset_path}")
         return 1
 
-    # Apply preset if specified
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
+    # Apply preset if specified (can override TUI settings)
     if args.preset:
         set_config_from_preset(args.preset)
 
@@ -446,7 +455,10 @@ def cmd_wikipedia(args):
     """Train on Wikipedia dump or API"""
     print("📚 Wikipedia training")
 
-    # Apply preset if specified
+    # Load TUI settings first (if available)
+    load_tui_settings()
+
+    # Apply preset if specified (can override TUI settings)
     if args.preset:
         set_config_from_preset(args.preset)
 
