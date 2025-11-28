@@ -509,13 +509,19 @@ class VectLLMBrain:
 
         # Se vocabolario è cresciuto, sincronizza con kernel
         if new_vocab_size > old_vocab_size:
+            # CRITICAL FIX: Always add new words to COLD vocab immediately
+            # This ensures _preload_tokens_to_hot() can find them later
+            # Only the HOT (GPU) loading is deferred, not COLD (RAM) initialization
+            self._add_new_words_to_cold(old_vocab_size, new_vocab_size)
+
             if self._defer_sync_depth > 0:
-                # Queue sync for later (avoid GPU contention during validation/training)
+                # Queue HOT (GPU) loading for later (avoid GPU contention during validation/training)
                 if self._deferred_old_size is None:
                     self._deferred_old_size = old_vocab_size
                 self._deferred_new_size = new_vocab_size
             else:
-                self._sync_new_words(old_vocab_size, new_vocab_size)
+                # Sync immediately (cold already done, now load to hot)
+                self._load_new_words_to_hot(old_vocab_size, new_vocab_size)
 
         return tokens
 
@@ -530,7 +536,8 @@ class VectLLMBrain:
         # Only sync if we're back to depth 0 (no more defer contexts)
         if self._defer_sync_depth == 0:
             if self._deferred_old_size is not None and self._deferred_new_size is not None:
-                self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
+                # Load deferred words to HOT (cold already initialized in encode_text)
+                self._load_new_words_to_hot(self._deferred_old_size, self._deferred_new_size)
             self._deferred_old_size = None
             self._deferred_new_size = None
 
@@ -553,7 +560,8 @@ class VectLLMBrain:
         # Only sync if we're back to depth 0 (no more defer contexts)
         if self._defer_sync_depth == 0:
             if self._deferred_old_size is not None and self._deferred_new_size is not None:
-                self._sync_new_words(self._deferred_old_size, self._deferred_new_size)
+                # Load deferred words to HOT (cold already initialized in encode_text)
+                self._load_new_words_to_hot(self._deferred_old_size, self._deferred_new_size)
             self._deferred_old_size = None
             self._deferred_new_size = None
 
@@ -590,6 +598,103 @@ class VectLLMBrain:
             self._char_cache_sync_count = 0
 
         return char_embeddings
+
+    def _add_new_words_to_cold(self, old_size: int, new_size: int):
+        """
+        Add new words to COLD vocab (RAM) immediately.
+        This is ALWAYS executed, even when sync is deferred.
+
+        CRITICAL: This ensures _preload_tokens_to_hot() can find words in cold vocab.
+        """
+        if not self.initialized:
+            return
+
+        # Collect new words
+        new_words = []
+        for word_id in range(old_size, new_size):
+            if word_id in self.vocab.id_to_word:
+                word = self.vocab.id_to_word[word_id]
+                new_words.append((word_id, word))
+
+        if not new_words:
+            return
+
+        # Get cached char embeddings
+        char_embeddings = self._get_char_embeddings_cached()
+
+        # Add ALL new words to COLD vocab immediately
+        for word_id, word in new_words:
+            if word_id not in self._cold_vocab:
+                init_emb = self.vocab.get_word_embedding_init(word, char_embeddings)
+                self._cold_vocab[word_id] = init_emb.copy()
+                self._word_usage_count[word_id] = 1  # Initial usage
+            else:
+                # Word already in cold, increment usage
+                self._word_usage_count[word_id] += 1
+
+    def _load_new_words_to_hot(self, old_size: int, new_size: int):
+        """
+        Load new words from COLD to HOT (GPU) based on LRU strategy.
+        This can be deferred during training to avoid GPU contention.
+        """
+        if not self.initialized:
+            return
+
+        if not VOCAB_OPTIMIZATION_CONFIG.ENABLE_VOCAB_OPTIMIZATION:
+            # Fallback to legacy
+            self._sync_new_words_legacy(old_size, new_size)
+            return
+
+        start_time = time.time()
+
+        # Collect new words
+        new_words = []
+        for word_id in range(old_size, new_size):
+            if word_id in self.vocab.id_to_word:
+                word = self.vocab.id_to_word[word_id]
+                new_words.append((word_id, word))
+
+        if not new_words:
+            return
+
+        # Get cached char embeddings
+        char_embeddings = self._get_char_embeddings_cached()
+
+        # Decide which words to load into HOT (LRU cache)
+        words_to_hot = []
+        for word_id, word in new_words:
+            # Check if hot vocab has space
+            hot_vocab_size = len(self._hot_vocab_ids)
+
+            if word_id in self._hot_vocab_ids:
+                # Already in hot, just increment usage (already done in _add_new_words_to_cold)
+                continue
+            elif hot_vocab_size < VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB:
+                # Space available, load to hot
+                words_to_hot.append((word_id, word))
+            else:
+                # Hot is full, check if this word is more important than LRU
+                if self._should_load_to_hot(word_id):
+                    # Evict LRU word and load this one
+                    self._evict_lru_word()
+                    words_to_hot.append((word_id, word))
+
+        # Batch load selected words to HOT (GPU)
+        if words_to_hot:
+            self._batch_load_to_hot(words_to_hot, char_embeddings)
+
+        # Track performance
+        elapsed = time.time() - start_time
+        self._total_sync_time += elapsed
+        self._sync_count += 1
+        self._last_sync_time = elapsed
+
+        cold_size = len(self._cold_vocab)
+        hot_size = len(self._hot_vocab_ids)
+        if len(words_to_hot) > 0:
+            avg_time = self._total_sync_time / self._sync_count if self._sync_count > 0 else elapsed
+            print(f"   🔄 Loaded {len(words_to_hot)} words to HOT in {elapsed*1000:.1f}ms (avg: {avg_time*1000:.1f}ms)")
+            print(f"      Cold: {cold_size}, Hot: {hot_size}/{VOCAB_OPTIMIZATION_CONFIG.MAX_HOT_VOCAB}")
 
     def _sync_new_words(self, old_size: int, new_size: int):
         """
