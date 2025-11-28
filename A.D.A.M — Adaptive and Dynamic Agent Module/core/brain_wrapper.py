@@ -571,6 +571,9 @@ class VectLLMBrain:
         End deferred sync mode - execute batched syncs.
         Call at end of training pass.
         Only syncs when all deferred contexts have ended.
+
+        OPTIMIZATION: Also incrementally updates cold vocab to distribute
+        sync cost across training instead of blocking checkpoint saves.
         """
         self._defer_sync_depth = max(0, self._defer_sync_depth - 1)
 
@@ -581,6 +584,13 @@ class VectLLMBrain:
                 self._load_new_words_to_hot(self._deferred_old_size, self._deferred_new_size)
             self._deferred_old_size = None
             self._deferred_new_size = None
+
+            # OPTIMIZATION: Incrementally update cold vocab from hot
+            # This distributes sync cost across training instead of blocking checkpoint saves
+            # Update 100 words per pass (configurable via VOCAB_OPTIMIZATION_CONFIG)
+            if VOCAB_OPTIMIZATION_CONFIG.SAVE_COLD_VOCAB and self._hot_vocab_ids:
+                max_words = getattr(VOCAB_OPTIMIZATION_CONFIG, 'INCREMENTAL_COLD_SYNC_BATCH', 100)
+                self.update_cold_from_hot_incremental(max_words=max_words)
 
     def decode_tokens(self, tokens: List[int]) -> str:
         """Decode tokens a text"""
@@ -1319,7 +1329,8 @@ class VectLLMBrain:
         # Decode generated tokens
         return self.vocab.decode(generated_tokens)
     
-    def save_checkpoint(self, filepath: str, save_vocab: bool = True, save_cold: bool = True) -> bool:
+    def save_checkpoint(self, filepath: str, save_vocab: bool = True, save_cold: bool = True,
+                       sync_cold_embeddings: bool = True) -> bool:
         """
         Salva checkpoint (brain + vocabolario + cold vocab).
 
@@ -1327,10 +1338,15 @@ class VectLLMBrain:
             filepath: Path al checkpoint (es. "checkpoint.ckpt")
             save_vocab: Se True, salva anche vocabolario
             save_cold: Se True, salva anche cold vocab embeddings
+            sync_cold_embeddings: Se True, aggiorna cold vocab da GPU prima di salvare
+                                 (default True, ma può essere False se aggiornato incrementalmente)
 
         Returns:
             True se successo
         """
+        import time
+        start_time = time.time()
+
         # Save brain checkpoint
         result = self.lib.save_checkpoint(filepath.encode('utf-8'))
 
@@ -1344,10 +1360,21 @@ class VectLLMBrain:
 
         # Save cold vocab (all embeddings for persistence)
         if save_cold and self._cold_vocab:
-            # Update cold vocab with latest GPU embeddings before saving
-            self.update_cold_from_hot()
+            # Optionally update cold vocab with latest GPU embeddings before saving
+            # OPTIMIZATION: Skip this if you update cold vocab incrementally during training
+            if sync_cold_embeddings:
+                sync_start = time.time()
+                self.update_cold_from_hot()
+                sync_elapsed = time.time() - sync_start
+                if sync_elapsed > 0.1:  # Only log if sync took >100ms
+                    print(f"   ⏱️  Cold sync took {sync_elapsed*1000:.1f}ms")
+
             cold_path = Path(filepath).with_suffix('.cold')
             self.save_cold_vocab(str(cold_path))
+
+        elapsed = time.time() - start_time
+        if elapsed > 0.5:  # Log if checkpoint save took >500ms
+            print(f"   ⏱️  Checkpoint save took {elapsed:.2f}s")
 
         return True
     
@@ -1579,33 +1606,80 @@ class VectLLMBrain:
 
         return activated
 
-    def update_cold_from_hot(self, word_ids: List[int] = None):
+    def update_cold_from_hot(self, word_ids: List[int] = None, silent: bool = False):
         """
         Update cold vocab with latest embeddings from GPU (hot).
         Call this periodically to keep cold vocab in sync.
 
+        OPTIMIZED: Uses preallocated buffer to minimize allocations.
+
         Args:
             word_ids: Specific words to update (None = all hot words)
+            silent: If True, don't print status message
+
+        Returns:
+            Number of words updated
         """
         if not self.initialized:
-            return
+            return 0
 
         if word_ids is None:
             word_ids = list(self._hot_vocab_ids)
 
+        if not word_ids:
+            return 0
+
         embed_dim = MODEL_CONFIG.EMBED_DIM
+
+        # Preallocate single buffer (reused for all words)
         emb_buffer = (ctypes.c_float * embed_dim)()
+
+        # Preallocate numpy array for faster copy
+        emb_array = np.zeros(embed_dim, dtype=np.float32)
 
         updated = 0
         for word_id in word_ids:
             if word_id in self._hot_vocab_ids:
                 result = self.lib.get_word_embedding(word_id, emb_buffer)
                 if result == 0:
-                    self._cold_vocab[word_id] = np.array(emb_buffer, dtype=np.float32)
+                    # Fast copy using numpy (avoids repeated np.array allocations)
+                    ctypes.memmove(emb_array.ctypes.data, emb_buffer, embed_dim * 4)
+                    self._cold_vocab[word_id] = emb_array.copy()
                     updated += 1
 
-        if updated > 0:
+        if updated > 0 and not silent:
             print(f"   🔄 Updated {updated} cold embeddings from GPU")
+
+        return updated
+
+    def update_cold_from_hot_incremental(self, max_words: int = 100):
+        """
+        Update cold vocab incrementally (only N words per call).
+        Call this periodically during training to avoid blocking checkpoint saves.
+
+        OPTIMIZATION: Distributes cold vocab sync across training instead of
+        doing it all at once during checkpoint save.
+
+        Args:
+            max_words: Maximum words to update per call (default: 100)
+
+        Returns:
+            Number of words updated
+        """
+        if not self.initialized or not self._hot_vocab_ids:
+            return 0
+
+        # Get list of hot words sorted by usage (update most-used first)
+        hot_words = sorted(
+            list(self._hot_vocab_ids),
+            key=lambda wid: self._word_usage_count.get(wid, 0),
+            reverse=True
+        )
+
+        # Update up to max_words
+        words_to_update = hot_words[:max_words]
+
+        return self.update_cold_from_hot(words_to_update, silent=True)
 
     def get_cold_vocab_stats(self) -> Dict:
         """Get statistics about hot/cold vocabulary."""
