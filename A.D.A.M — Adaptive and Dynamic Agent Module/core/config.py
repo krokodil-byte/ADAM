@@ -467,7 +467,7 @@ def load_tui_settings():
     import json
     from pathlib import Path
 
-    global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG
+    global MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG, GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG, RUNTIME_CONFIG
 
     tui_settings_file = Path.home() / ".adam" / "tui_settings.json"
 
@@ -486,91 +486,64 @@ def load_tui_settings():
 
         loaded_count = 0
 
+        def apply_setting(key: str, value):
+            """Apply a setting to the correct config object (searches all configs)"""
+            nonlocal loaded_count
+            key_upper = key.upper()
+
+            # Try all config objects (order matters: most likely first)
+            for config_obj in [MODEL_CONFIG, TRAINING_CONFIG, PERFORMANCE_CONFIG,
+                              GENERATION_CONFIG, VOCAB_OPTIMIZATION_CONFIG, RUNTIME_CONFIG]:
+                if hasattr(config_obj, key_upper):
+                    setattr(config_obj, key_upper, value)
+                    loaded_count += 1
+                    return True
+                elif hasattr(config_obj, key):
+                    setattr(config_obj, key, value)
+                    loaded_count += 1
+                    return True
+
+            return False
+
         # Apply ARCHITECTURE settings
         if 'architecture' in settings:
             for key, value in settings['architecture'].items():
-                if hasattr(MODEL_CONFIG, key.upper()):
-                    setattr(MODEL_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(MODEL_CONFIG, key):
-                    setattr(MODEL_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
-        # Apply VENN settings
+        # Apply VENN settings (note: venn_update_frequency is in TRAINING_CONFIG)
         if 'venn' in settings:
             for key, value in settings['venn'].items():
-                if hasattr(MODEL_CONFIG, key.upper()):
-                    setattr(MODEL_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(MODEL_CONFIG, key):
-                    setattr(MODEL_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         # Apply VOCABULARY settings
         if 'vocabulary' in settings:
             for key, value in settings['vocabulary'].items():
-                if hasattr(MODEL_CONFIG, key.upper()):
-                    setattr(MODEL_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(MODEL_CONFIG, key):
-                    setattr(MODEL_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         # Legacy: Apply MODEL settings (old format compatibility)
         if 'model' in settings:
             for key, value in settings['model'].items():
-                if hasattr(MODEL_CONFIG, key.upper()):
-                    setattr(MODEL_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(MODEL_CONFIG, key):
-                    setattr(MODEL_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         # Apply TRAINING settings
         if 'training' in settings:
             for key, value in settings['training'].items():
-                if hasattr(TRAINING_CONFIG, key.upper()):
-                    setattr(TRAINING_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(TRAINING_CONFIG, key):
-                    setattr(TRAINING_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         # Apply GENERATION settings
         if 'generation' in settings:
             for key, value in settings['generation'].items():
-                if hasattr(GENERATION_CONFIG, key.upper()):
-                    setattr(GENERATION_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(GENERATION_CONFIG, key):
-                    setattr(GENERATION_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         # Apply PERFORMANCE settings
         if 'performance' in settings:
             for key, value in settings['performance'].items():
-                if hasattr(PERFORMANCE_CONFIG, key.upper()):
-                    setattr(PERFORMANCE_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(PERFORMANCE_CONFIG, key):
-                    setattr(PERFORMANCE_CONFIG, key, value)
-                    loaded_count += 1
-                elif hasattr(RUNTIME_CONFIG, key.upper()):
-                    setattr(RUNTIME_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(RUNTIME_CONFIG, key):
-                    setattr(RUNTIME_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         # Apply VOCAB_OPTIMIZATION settings
         if 'vocab_optimization' in settings:
             for key, value in settings['vocab_optimization'].items():
-                if hasattr(VOCAB_OPTIMIZATION_CONFIG, key.upper()):
-                    setattr(VOCAB_OPTIMIZATION_CONFIG, key.upper(), value)
-                    loaded_count += 1
-                elif hasattr(VOCAB_OPTIMIZATION_CONFIG, key):
-                    setattr(VOCAB_OPTIMIZATION_CONFIG, key, value)
-                    loaded_count += 1
+                apply_setting(key, value)
 
         if loaded_count > 0:
             print(f"✓ Loaded {loaded_count} settings from TUI config")
