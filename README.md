@@ -403,30 +403,6 @@ Batch 3: Encode text                       Process stats
 
 ## ⚡ Performance
 
-### GPU Optimizations
-
-| Optimization | Speedup | Status |
-|--------------|---------|--------|
-| cuBLAS GEMM for attention | 10-15x | ✅ Active |
-| Fused attention+FFN kernels | 2-3x | ✅ Active |
-| Block-reduce cross-entropy | 5-8x | ✅ Active |
-| Pipelined training (3-stage) | 1.5-2x | ✅ Active |
-| Warp-level primitives | 1.3-1.5x | ✅ Active |
-| Vocab pre-training | 1.2x | ✅ NEW! |
-| **Total** | **50-100x** | ✅ |
-
-### Benchmarks
-
-**Hardware:** RTX 4090 (24GB)
-
-| Mode | Tokens/sec | GPU Util | Notes |
-|------|-----------|----------|-------|
-| Baseline (no opt) | 1,200 | 45% | Naive implementation |
-| cuBLAS only | 15,000 | 70% | Matrix ops optimized |
-| + Fused kernels | 45,000 | 85% | Reduced memory bandwidth |
-| + Pipeline (3-stage) | 96,000 | 95% | Full overlap |
-| + Vocab pre-training | **115,000** | **95%** | Zero vocab overhead |
-
 ### Memory Usage
 
 | Component | RAM | VRAM | Notes |
