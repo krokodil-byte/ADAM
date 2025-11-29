@@ -450,8 +450,20 @@ def _merge_config(target_config, preset_config):
     """
     Merge preset config into target config, updating only non-default values.
     Preserves user customizations.
+
+    IMPORTANT: Architecture parameters are NEVER overwritten by presets.
+    Architecture is controlled exclusively by TUI settings.
     """
+    # Architecture parameters that presets should NEVER modify
+    ARCHITECTURE_PARAMS = {
+        'NUM_LAYERS', 'EMBED_DIM', 'NUM_HEADS', 'MAX_SEQ_LEN', 'EPISODIC_BUFFER_SIZE'
+    }
+
     for key in preset_config.__dict__:
+        # Skip architecture parameters - these are TUI-only
+        if key in ARCHITECTURE_PARAMS:
+            continue
+
         if hasattr(target_config, key):
             setattr(target_config, key, getattr(preset_config, key))
 
