@@ -296,12 +296,12 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.0,
                 MOMENTUM=0.0,
                 EXPLORATION_TEMPERATURE=0.5,
+                VENN_UPDATE_FREQUENCY=0,  # No Venn updates during inference
             ),
             "model": ModelConfig(
                 # Architecture NOT modified by presets (use TUI settings)
                 # Only Venn and vocabulary parameters
                 WORD_CREATION_THRESHOLD=0,  # No new words during inference
-                VENN_UPDATE_FREQUENCY=0,  # No Venn updates during inference
             ),
             "performance": PerformanceConfig(
                 USE_FUSED_KERNELS=True,
