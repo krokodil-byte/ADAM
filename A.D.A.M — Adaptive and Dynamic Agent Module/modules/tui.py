@@ -148,11 +148,13 @@ class ADAMTUI:
             'settings': {
                 'title': 'Settings',
                 'items': [
-                    ('model', '🏗️  Model & Venn', 'Architecture, vocabulary, Venn system'),
+                    ('architecture', '🏗️  Architecture', 'Model layers, dimensions, sequence length'),
+                    ('venn', '🔷 Venn System', 'Venn clusters, propagation, membership'),
+                    ('vocabulary', '🔤 Vocabulary', 'Word creation, pruning, vocab size'),
                     ('training', '📈 Training', 'Learning rates, batch size, validation'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU/CUDA optimizations'),
-                    ('vocab_opt', '🔤 Vocab Optimization', 'Hot/cold, caching, preloading'),
+                    ('vocab_opt', '💾 Vocab Optimization', 'Hot/cold, caching, preloading'),
                     ('save', '💾 Save Settings', 'Save to config file'),
                     ('back', '← Back', 'Return to main menu'),
                 ]
@@ -162,14 +164,14 @@ class ADAMTUI:
     def _load_default_settings(self) -> Dict[str, Dict[str, Any]]:
         """Load default settings from config"""
         return {
-            'model': {
+            'architecture': {
                 'num_layers': MODEL_CONFIG.NUM_LAYERS,
                 'embed_dim': MODEL_CONFIG.EMBED_DIM,
                 'num_heads': MODEL_CONFIG.NUM_HEADS,
                 'max_seq_len': MODEL_CONFIG.MAX_SEQ_LEN,
-                'word_creation_threshold': MODEL_CONFIG.WORD_CREATION_THRESHOLD,
-                'word_pruning_threshold': MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
-                'max_word_length': MODEL_CONFIG.MAX_WORD_LENGTH,
+                'episodic_buffer_size': MODEL_CONFIG.EPISODIC_BUFFER_SIZE,
+            },
+            'venn': {
                 # Multi-Head Venn parameters
                 'enable_venn_multihead': MODEL_CONFIG.ENABLE_VENN_MULTIHEAD,
                 'num_venn_heads': MODEL_CONFIG.NUM_VENN_HEADS,
@@ -183,7 +185,12 @@ class ADAMTUI:
                 'primary_membership_weight': MODEL_CONFIG.PRIMARY_MEMBERSHIP_WEIGHT,
                 'secondary_membership_weight': MODEL_CONFIG.SECONDARY_MEMBERSHIP_WEIGHT,
                 'venn_update_lr': MODEL_CONFIG.CLUSTER_UPDATE_LR,
-                'episodic_buffer_size': MODEL_CONFIG.EPISODIC_BUFFER_SIZE,
+            },
+            'vocabulary': {
+                'word_creation_threshold': MODEL_CONFIG.WORD_CREATION_THRESHOLD,
+                'word_pruning_threshold': MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
+                'max_word_length': MODEL_CONFIG.MAX_WORD_LENGTH,
+                'max_word_vocab_size': MODEL_CONFIG.MAX_WORD_VOCAB_SIZE,
             },
             'training': {
                 'base_lr': TRAINING_CONFIG.BASE_LR,
@@ -492,14 +499,18 @@ class ADAMTUI:
 
         # Settings categories - handle BEFORE menu navigation
         # so we call _edit_settings instead of navigating to their menus
-        if key == 'model':
-            self._edit_settings(stdscr, 'model')
-            return
-        elif key == 'vocabulary':
-            self._edit_settings(stdscr, 'model')  # Vocabulary settings are in model config
+        if key == 'architecture':
+            self._edit_settings(stdscr, 'architecture')
             return
         elif key == 'venn':
-            self._edit_settings(stdscr, 'model')  # Venn settings are in model config
+            self._edit_settings(stdscr, 'venn')
+            return
+        elif key == 'vocabulary':
+            self._edit_settings(stdscr, 'vocabulary')
+            return
+        elif key == 'model':
+            # Legacy - redirect to architecture
+            self._edit_settings(stdscr, 'architecture')
             return
         elif key == 'training':
             self._edit_settings(stdscr, 'training')
@@ -553,15 +564,19 @@ class ADAMTUI:
                     self.message = "Invalid number"
                     self.message_type = "error"
         elif key == 'preset':
-            presets = ['default', 'fast_learning', 'stable', 'high_performance', 'max_throughput', 'memory_efficient']
+            presets = ['none', 'default', 'fast_learning', 'stable', 'inference', 'research', 'high_performance', 'max_throughput', 'memory_efficient']
             idx = self._select_dialog(stdscr, "Select Preset", presets)
             if idx >= 0:
                 self.values['preset'] = presets[idx]
-                # Apply preset immediately to global config
-                from core.config import set_config_from_preset
-                set_config_from_preset(presets[idx])
-                self.message = f"Preset '{presets[idx]}' applied"
-                self.message_type = "success"
+                # Apply preset immediately to global config (only if not "none")
+                if presets[idx] != 'none':
+                    from core.config import set_config_from_preset
+                    set_config_from_preset(presets[idx])
+                    self.message = f"Preset '{presets[idx]}' applied"
+                    self.message_type = "success"
+                else:
+                    self.message = "Using TUI settings (no preset)"
+                    self.message_type = "success"
         elif key == 'language':
             value = self._input_dialog(stdscr, "Language Code", self.values['language'])
             if value is not None:
