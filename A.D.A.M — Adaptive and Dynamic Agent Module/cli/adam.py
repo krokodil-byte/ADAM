@@ -101,9 +101,11 @@ def cmd_train(args):
     load_tui_settings()
 
     # Apply preset if specified (can override TUI settings)
-    if args.preset:
+    if args.preset and args.preset != 'none':
         set_config_from_preset(args.preset)
         print(f"   Config: {args.preset} preset")
+    elif args.preset == 'none':
+        print(f"   Config: Using TUI settings only")
     
     # Create brain
     vocab_path = Path(args.vocab) if args.vocab else None
@@ -372,8 +374,11 @@ def cmd_dataset(args):
     load_tui_settings()
 
     # Apply preset if specified (can override TUI settings)
-    if args.preset:
+    if args.preset and args.preset != 'none':
         set_config_from_preset(args.preset)
+        print(f"   Config: {args.preset} preset")
+    elif args.preset == 'none':
+        print(f"   Config: Using TUI settings only")
 
     # Detect dataset type: HuggingFace (JSONL/Parquet/CSV) or plain text
     is_hf_format = dataset_path.suffix.lower() in ['.jsonl', '.json', '.parquet', '.csv', '.tsv']
@@ -459,8 +464,11 @@ def cmd_wikipedia(args):
     load_tui_settings()
 
     # Apply preset if specified (can override TUI settings)
-    if args.preset:
+    if args.preset and args.preset != 'none':
         set_config_from_preset(args.preset)
+        print(f"   Config: {args.preset} preset")
+    elif args.preset == 'none':
+        print(f"   Config: Using TUI settings only")
 
     # Create brain
     brain = VectLLMBrain()
@@ -578,8 +586,8 @@ def main():
     parser_train.add_argument('-v', '--vocab', help='Vocabulary file')
     parser_train.add_argument('-p', '--passes', type=int, default=1, 
                              help='Number of training passes (default: 1)')
-    parser_train.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'inference', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
-                             help='Config preset')
+    parser_train.add_argument('--preset', choices=['none', 'default', 'fast_learning', 'stable', 'inference', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
+                             help='Config preset (none = use TUI settings only)')
     parser_train.add_argument('--auto-save', type=int, metavar='N',
                              help='Auto-save checkpoint every N passes')
     parser_train.add_argument('--prune-vocab', action='store_true',
@@ -619,8 +627,8 @@ def main():
     parser_dataset.add_argument('-c', '--checkpoint', help='Load from checkpoint')
     parser_dataset.add_argument('-p', '--passes', type=int, default=1,
                                help='Number of passes (default: 1)')
-    parser_dataset.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
-                               help='Config preset')
+    parser_dataset.add_argument('--preset', choices=['none', 'default', 'fast_learning', 'stable', 'inference', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
+                               help='Config preset (none = use TUI settings only)')
     parser_dataset.add_argument('--auto-save', type=int, metavar='N',
                                help='Auto-save every N files/samples')
     parser_dataset.add_argument('--extensions', type=str,
@@ -662,8 +670,8 @@ def main():
                             help='Maximum number of articles to process')
     parser_wiki.add_argument('--auto-save', type=int,
                             help='Auto-save every N articles')
-    parser_wiki.add_argument('--preset', choices=['default', 'fast_learning', 'stable', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
-                            help='Config preset')
+    parser_wiki.add_argument('--preset', choices=['none', 'default', 'fast_learning', 'stable', 'inference', 'research', 'high_performance', 'memory_efficient', 'max_throughput'],
+                            help='Config preset (none = use TUI settings only)')
     parser_wiki.add_argument('--language', type=str, default='en',
                             help='Wikipedia language code (default: en)')
     parser_wiki.add_argument('--batch-size', type=int, default=100,
