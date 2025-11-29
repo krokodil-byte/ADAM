@@ -1867,11 +1867,12 @@ void set_exploration_params(float temp, float momentum) {
 void process_input(const char* text) {
     if (!g_system) return;
     int len = strlen(text);
-    if (len > MAX_SEQ_LEN) len = MAX_SEQ_LEN;
-    
+    // Use runtime max_seq_len instead of hardcoded MAX_SEQ_LEN
+    if (len > runtime_max_seq_len) len = runtime_max_seq_len;
+
     int* h_tokens = (int*)malloc(len * sizeof(int));
     for (int i = 0; i < len; i++) h_tokens[i] = (int)text[i];
-    
+
     cudaMemcpy(g_system->llm.current_sequence, h_tokens, len * sizeof(int), cudaMemcpyHostToDevice);
     g_system->llm.seq_len = len;
     free(h_tokens);
@@ -1889,8 +1890,8 @@ int get_output(int* output, int max_len) {
 int generate_next_token(int* input_tokens, int num_tokens, float temperature, float* out_prob) {
     if (!g_system || num_tokens == 0) return -1;
 
-    // Cap sequence length
-    int seq_len = (num_tokens > MAX_SEQ_LEN) ? MAX_SEQ_LEN : num_tokens;
+    // Cap sequence length to runtime max (not hardcoded 512)
+    int seq_len = (num_tokens > runtime_max_seq_len) ? runtime_max_seq_len : num_tokens;
 
     // Copy input to device
     cudaMemcpy(g_system->llm.current_sequence, input_tokens, seq_len * sizeof(int), cudaMemcpyHostToDevice);
@@ -1995,8 +1996,8 @@ int generate_next_token(int* input_tokens, int num_tokens, float temperature, fl
 int get_token_probabilities(int* input_tokens, int num_tokens, float temperature, float* out_probs, int max_vocab) {
     if (!g_system || num_tokens == 0) return -1;
 
-    // Similar forward pass as generate_next_token
-    int seq_len = (num_tokens > MAX_SEQ_LEN) ? MAX_SEQ_LEN : num_tokens;
+    // Similar forward pass as generate_next_token (use runtime max_seq_len)
+    int seq_len = (num_tokens > runtime_max_seq_len) ? runtime_max_seq_len : num_tokens;
 
     cudaMemcpy(g_system->llm.current_sequence, input_tokens, seq_len * sizeof(int), cudaMemcpyHostToDevice);
     g_system->llm.seq_len = seq_len;
@@ -2368,11 +2369,11 @@ int feed_training_batch(const int* tokens, int batch_size) {
     OperationMode prev_mode = g_system->current_mode;
     g_system->current_mode = MODE_EXTERNAL_INPUT;
     
-    // Process batch in chunks (max sequence length)
+    // Process batch in chunks (use runtime max_seq_len)
     int processed = 0;
     while (processed < batch_size) {
-        int chunk_size = (batch_size - processed < MAX_SEQ_LEN) ? 
-                        (batch_size - processed) : MAX_SEQ_LEN;
+        int chunk_size = (batch_size - processed < runtime_max_seq_len) ?
+                        (batch_size - processed) : runtime_max_seq_len;
         
         // Copy chunk to device
         cudaMemcpy(g_system->llm.current_sequence, 
