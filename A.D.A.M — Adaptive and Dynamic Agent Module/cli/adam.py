@@ -27,7 +27,6 @@ try:
     )
     from core.stats import StatsCollector
     from Utils.checkpoint import CheckpointManager
-    from modules.training import MultiPassTrainer
     from modules.chat import InteractiveChat
     from modules.dataset_training import DatasetLoader, DatasetTrainer, HFDatasetLoader, HFDatasetTrainer
     from modules.wikipedia_training import WikipediaExtractor, WikipediaTrainer, WikipediaStreamTrainer
@@ -42,7 +41,6 @@ except ImportError:
     )
     from ..core.stats import StatsCollector
     from ..Utils.checkpoint import CheckpointManager
-    from ..modules.training import MultiPassTrainer
     from ..modules.chat import InteractiveChat
     from ..modules.dataset_training import DatasetLoader, DatasetTrainer, HFDatasetLoader, HFDatasetTrainer
     from ..modules.wikipedia_training import WikipediaExtractor, WikipediaTrainer, WikipediaStreamTrainer
