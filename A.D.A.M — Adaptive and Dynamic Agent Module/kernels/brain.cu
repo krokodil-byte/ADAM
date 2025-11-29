@@ -1,5 +1,54 @@
+/*
+ * =============================================================================
+ * VectLLM Unified CUDA Kernel - A.D.A.M Brain
+ * =============================================================================
+ *
+ * This kernel implements the complete A.D.A.M (Adaptive and Dynamic Agent Module)
+ * transformer architecture with:
+ *
+ * 1. Dynamic Vocabulary System (Hot/Cold Architecture)
+ *    - Hot vocab: 10,000 most frequent words on GPU (fast access)
+ *    - Cold vocab: Unlimited words in RAM (CPU-side, swapped via LRU)
+ *    - Character fallback: 256 ASCII/UTF-8 chars (always available)
+ *
+ * 2. Multi-Head Venn Semantic System
+ *    - Each attention head has its own semantic cluster space
+ *    - Soft cluster membership with propagation between similar clusters
+ *    - Online K-means clustering for continuous learning
+ *
+ * 3. Episodic Memory
+ *    - Circular buffer for recent experiences
+ *    - Used for replay and temporal context
+ *
+ * 4. Dynamic Compilation
+ *    The #define values below are PLACEHOLDERS.
+ *    Python's CUDACompiler (brain_wrapper.py) injects TUI-configured values
+ *    before compilation. This ensures the model uses the architecture settings
+ *    from the TUI (Text User Interface).
+ *
+ *    Compilation flow:
+ *    1. User sets architecture in TUI -> saved to ~/.adam/tui_settings.json
+ *    2. Python loads TUI settings into MODEL_CONFIG
+ *    3. CUDACompiler reads brain.cu source code
+ *    4. Compiler replaces #define values with MODEL_CONFIG values
+ *    5. Modified source compiled to .so library
+ *    6. Hash includes architecture params -> recompile on change
+ *
+ *    Example:
+ *    User sets: 12 layers, 1024 dim, 16 heads, 2048 seq_len in TUI
+ *    Compiler injects: #define NUM_LAYERS 12, #define EMBED_DIM 1024, etc.
+ *    NVCC compiles with injected values
+ *    Result: Model with exact TUI architecture
+ *
+ * 5. Runtime Configuration
+ *    After compilation, set_model_config() is called from Python to pass
+ *    runtime values to the kernel. This allows runtime validation and
+ *    dynamic allocation based on TUI settings.
+ *
+ * =============================================================================
+ */
 
-// VectLLM Unified CUDA Kernel - Embedded Version
+// Standard CUDA and C libraries
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <curand.h>
@@ -11,19 +60,25 @@
 #include <unistd.h>
 #include <time.h>
 
-#define MAX_SEQ_LEN 512
-#define CHAR_VOCAB_SIZE 256
-#define MAX_WORD_VOCAB_SIZE 10000  // Aligned with MAX_HOT_VOCAB (hot/cold architecture)
+// =============================================================================
+// ARCHITECTURE PARAMETERS (Dynamically injected by CUDACompiler)
+// =============================================================================
+// DO NOT modify these directly. They are replaced at compile time by values
+// from core/config.py (MODEL_CONFIG). See brain_wrapper.py for injection logic.
+
+#define MAX_SEQ_LEN 512               // Maximum sequence length
+#define CHAR_VOCAB_SIZE 256           // ASCII/UTF-8 character set size
+#define MAX_WORD_VOCAB_SIZE 10000     // Hot vocabulary size (GPU-resident)
 #define TOTAL_VOCAB_SIZE (CHAR_VOCAB_SIZE + MAX_WORD_VOCAB_SIZE)
-#define EMBED_DIM 768
-#define NUM_HEADS 12
-#define NUM_LAYERS 6
-#define VENN_CLUSTERS 256  // Per-head clusters (backward compat: total if single-head)
-#define NUM_VENN_HEADS 12  // Multi-Head Venn Architecture
-#define VENN_HEAD_DIM (EMBED_DIM / NUM_VENN_HEADS)  // 64 per head
-#define EPISODIC_BUFFER_SIZE 1024
-#define DEFAULT_BLOCK_SIZE 256  // CUDA block size for kernel launches
-#define MAX_COLD_VOCAB 100000  // Maximum word_id supported (for slot table)
+#define EMBED_DIM 768                 // Embedding dimension
+#define NUM_HEADS 12                  // Attention heads
+#define NUM_LAYERS 6                  // Transformer layers
+#define VENN_CLUSTERS 256             // Clusters per Venn head
+#define NUM_VENN_HEADS 12             // Multi-head Venn heads
+#define VENN_HEAD_DIM (EMBED_DIM / NUM_VENN_HEADS)  // Dimension per Venn head
+#define EPISODIC_BUFFER_SIZE 1024     // Episodic memory buffer size
+#define DEFAULT_BLOCK_SIZE 256        // CUDA block size for kernel launches
+#define MAX_COLD_VOCAB 100000         // Maximum word_id in slot table (cold vocab)
 
 // Include modular kernel files
 #include "vocabulary.cu"
