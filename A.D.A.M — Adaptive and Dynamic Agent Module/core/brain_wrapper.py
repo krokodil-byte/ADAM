@@ -58,9 +58,15 @@ class CUDACompiler:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
     def get_cache_path(self, kernel_path: Path) -> Path:
-        """Genera path cache basato su hash del kernel"""
+        """Genera path cache basato su hash del kernel + parametri architettura"""
         with open(kernel_path, 'rb') as f:
-            code_hash = hashlib.sha256(f.read()).hexdigest()[:16]
+            code = f.read()
+
+        # Include architecture parameters in hash so recompile on change
+        arch_params = f"{MODEL_CONFIG.NUM_LAYERS}_{MODEL_CONFIG.EMBED_DIM}_{MODEL_CONFIG.NUM_HEADS}_{MODEL_CONFIG.MAX_SEQ_LEN}"
+        combined = code + arch_params.encode()
+
+        code_hash = hashlib.sha256(combined).hexdigest()[:16]
         return self.cache_dir / f"libvectllm_{code_hash}.so"
     
     def find_nvcc(self) -> str:
@@ -98,26 +104,49 @@ class CUDACompiler:
         return "sm_86"
     
     def compile(self, kernel_path: Path, force: bool = False) -> Path:
-        """Compila il kernel CUDA"""
+        """Compila il kernel CUDA con parametri architettura da MODEL_CONFIG"""
         lib_path = self.get_cache_path(kernel_path)
-        
+
         if lib_path.exists() and not force:
             print(f"✓ Using cached library: {lib_path.name}")
             return lib_path
-        
-        print("🔨 Compiling CUDA kernel...")
+
+        print("🔨 Compiling CUDA kernel with TUI architecture...")
         print(f"   Source: {kernel_path}")
-        
+
+        # Read kernel source
+        with open(kernel_path, 'r') as f:
+            kernel_code = f.read()
+
+        # Inject MODEL_CONFIG parameters as #define
+        replacements = {
+            '#define MAX_SEQ_LEN 512': f'#define MAX_SEQ_LEN {MODEL_CONFIG.MAX_SEQ_LEN}',
+            '#define EMBED_DIM 768': f'#define EMBED_DIM {MODEL_CONFIG.EMBED_DIM}',
+            '#define NUM_HEADS 12': f'#define NUM_HEADS {MODEL_CONFIG.NUM_HEADS}',
+            '#define NUM_LAYERS 6': f'#define NUM_LAYERS {MODEL_CONFIG.NUM_LAYERS}',
+        }
+
+        for old, new in replacements.items():
+            kernel_code = kernel_code.replace(old, new)
+
+        # Write modified kernel to temp file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.cu', delete=False) as tmp:
+            tmp.write(kernel_code)
+            tmp_path = tmp.name
+
+        print(f"   Architecture: {MODEL_CONFIG.NUM_LAYERS} layers, {MODEL_CONFIG.EMBED_DIM} dim, {MODEL_CONFIG.NUM_HEADS} heads, {MODEL_CONFIG.MAX_SEQ_LEN} seq_len")
+
         nvcc = self.find_nvcc()
         arch = self.detect_gpu_arch()
-        
+
         print(f"   NVCC: {nvcc}")
         print(f"   Arch: {arch}")
-        
-        # Build command
+
+        # Build command with temp file
         cmd = [
             nvcc,
-            str(kernel_path),
+            tmp_path,
             '-o', str(lib_path)
         ] + RUNTIME_CONFIG.NVCC_FLAGS + [f'-arch={arch}']
         
@@ -125,27 +154,32 @@ class CUDACompiler:
         
         try:
             result = subprocess.run(
-                cmd, 
-                capture_output=True, 
+                cmd,
+                capture_output=True,
                 text=True,
                 timeout=120
             )
-            
+
             if result.returncode != 0:
                 print(f"❌ Compilation failed:")
                 print(result.stderr)
                 raise RuntimeError("CUDA compilation failed")
-            
+
             if result.stderr:
                 print(f"⚠️  Compilation warnings:\n{result.stderr}")
-            
+
             print(f"✅ Compiled successfully: {lib_path.name}")
             return lib_path
-            
+
         except subprocess.TimeoutExpired:
             raise RuntimeError("Compilation timeout (120s)")
         except Exception as e:
             raise RuntimeError(f"Compilation error: {e}")
+        finally:
+            # Clean up temp file
+            import os
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 
 class VectLLMBrain:
