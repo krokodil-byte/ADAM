@@ -258,6 +258,26 @@ class TrainingConfig:
     VENN_UPDATE_FREQUENCY: int = 100  # Aggiorna clusters ogni N cicli
     STATS_SYNC_FREQUENCY: int = 10  # Sync GPU stats ogni N cicli
 
+    # ========================================
+    # Reward System (replaces cross-entropy loss)
+    # ========================================
+    # A.D.A.M uses a dual reward system instead of traditional loss:
+    # - Top-K Accuracy: Rewards correct predictions within top-K tokens
+    # - Venn Semantic Similarity: Rewards semantically similar predictions
+    #
+    # Final reward = REWARD_ALPHA * topk_reward + (1-REWARD_ALPHA) * venn_reward
+    #
+    # This approach:
+    # - Is vocab-size independent (no softmax over 10k+ tokens)
+    # - Captures semantic correctness (not just exact match)
+    # - More stable gradients (no log probabilities)
+
+    USE_REWARD_SYSTEM: bool = True              # Enable reward-based learning (always True)
+    REWARD_ALPHA: float = 0.7                   # Weight for Top-K reward (0.0-1.0)
+    REWARD_TOP_K: int = 5                       # Consider top-K predictions (1-10)
+    REWARD_PENALTY_SCALE: float = 0.5           # Penalty scale for wrong predictions
+    REWARD_VENN_SIMILARITY_THRESHOLD: float = 0.3  # Min similarity for Venn reward
+
     # Validation settings
     VALIDATION_SPLIT: float = 0.1  # 10% dei dati per validation
     VALIDATION_FREQUENCY: int = 100  # Valida ogni N batches/samples (se validate_per_pass=False)

@@ -453,23 +453,33 @@ class VectLLMBrain:
         # set_exploration_params
         self.lib.set_exploration_params.argtypes = [ctypes.c_float, ctypes.c_float]
         self.lib.set_exploration_params.restype = None
-        
+
+        # set_reward_config - NEW: Configure reward system parameters
+        self.lib.set_reward_config.argtypes = [
+            ctypes.c_float,  # alpha
+            ctypes.c_int,    # top_k
+            ctypes.c_float,  # penalty_scale
+            ctypes.c_float   # venn_threshold
+        ]
+        self.lib.set_reward_config.restype = None
+
         # process_input
         self.lib.process_input.argtypes = [ctypes.c_char_p]
         self.lib.process_input.restype = None
-        
+
         # get_output
         self.lib.get_output.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
         self.lib.get_output.restype = ctypes.c_int
-        
-        # get_stats
+
+        # get_stats - UPDATED: Now returns rewards instead of loss
         self.lib.get_stats.argtypes = [
-            ctypes.POINTER(ctypes.c_longlong),
-            ctypes.POINTER(ctypes.c_longlong),
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.POINTER(ctypes.c_float),
-            ctypes.POINTER(ctypes.c_float)
+            ctypes.POINTER(ctypes.c_longlong),  # cycles
+            ctypes.POINTER(ctypes.c_longlong),  # tokens
+            ctypes.POINTER(ctypes.c_float),     # temperature
+            ctypes.POINTER(ctypes.c_float),     # momentum
+            ctypes.POINTER(ctypes.c_float),     # reward (final)
+            ctypes.POINTER(ctypes.c_float),     # topk_reward
+            ctypes.POINTER(ctypes.c_float)      # venn_reward
         ]
         self.lib.get_stats.restype = None
         
@@ -610,8 +620,17 @@ class VectLLMBrain:
         # Set Venn configuration from config.py
         self._configure_venn_system()
 
+        # Set reward system configuration from config.py
+        self.lib.set_reward_config(
+            TRAINING_CONFIG.REWARD_ALPHA,
+            TRAINING_CONFIG.REWARD_TOP_K,
+            TRAINING_CONFIG.REWARD_PENALTY_SCALE,
+            TRAINING_CONFIG.REWARD_VENN_SIMILARITY_THRESHOLD
+        )
+
         self.initialized = True
-        print("✅ Brain ready - continuous training active")
+        print("✅ Brain ready - reward-based training active")
+        print(f"   Reward: α={TRAINING_CONFIG.REWARD_ALPHA}, Top-K={TRAINING_CONFIG.REWARD_TOP_K}")
         print(f"   Vocab: {len(self.vocab.word_to_id)} words active")
     
     def stop(self):
@@ -1369,21 +1388,32 @@ class VectLLMBrain:
         return total_tokens
 
     def get_stats(self) -> Dict:
-        """Ottieni statistiche del sistema"""
+        """
+        Get system statistics.
+
+        Returns dictionary with training stats including:
+        - reward: Final combined reward (higher = better)
+        - topk_reward: Top-K accuracy component
+        - venn_reward: Venn semantic similarity component
+        - cycles, tokens, temperature, momentum
+        - vocab stats
+        """
         cycles = ctypes.c_longlong()
         tokens = ctypes.c_longlong()
         temp = ctypes.c_float()
         momentum = ctypes.c_float()
-        loss = ctypes.c_float()
-        perplexity = ctypes.c_float()
+        reward = ctypes.c_float()
+        topk_reward = ctypes.c_float()
+        venn_reward = ctypes.c_float()
 
         self.lib.get_stats(
             ctypes.byref(cycles),
             ctypes.byref(tokens),
             ctypes.byref(temp),
             ctypes.byref(momentum),
-            ctypes.byref(loss),
-            ctypes.byref(perplexity)
+            ctypes.byref(reward),
+            ctypes.byref(topk_reward),
+            ctypes.byref(venn_reward)
         )
 
         return {
@@ -1391,22 +1421,24 @@ class VectLLMBrain:
             'tokens': tokens.value,
             'temperature': temp.value,
             'momentum': momentum.value,
-            'loss': loss.value,
-            'perplexity': perplexity.value,
+            # Reward-based metrics (higher = better)
+            'reward': reward.value,
+            'topk_reward': topk_reward.value,
+            'venn_reward': venn_reward.value,
             # Vocab stats
             'vocab_words': len(self.vocab.word_to_id),
             'vocab_utilization': len(self.vocab.word_to_id) / self.vocab.max_word_vocab_size,
         }
 
-    def compute_validation_loss(self, tokens: List[int]) -> float:
+    def compute_validation_reward(self, tokens: List[int]) -> float:
         """
-        Compute loss on tokens without training (forward pass only).
+        Compute reward on tokens without training (forward pass only).
 
         Args:
             tokens: List of token IDs for validation
 
         Returns:
-            Validation loss (or -1 if error)
+            Validation reward (higher = better, or -1 if error)
         """
         if not self.initialized or not tokens:
             return -1.0
@@ -1423,25 +1455,25 @@ class VectLLMBrain:
                 token_array = (ctypes.c_int * n_tokens)(*tokens)
                 return self.lib.compute_validation_loss(token_array, n_tokens)
 
-        # Fallback: estimate loss from current model state
-        # This uses the training loss as a proxy (less accurate but works without kernel changes)
+        # Fallback: estimate reward from current model state
+        # This uses the training reward as a proxy (less accurate but works without kernel changes)
         stats = self.get_stats()
-        return stats['loss']
+        return stats['reward']
 
     def validate_on_text(self, text: str) -> float:
         """
-        Compute validation loss on text.
+        Compute validation reward on text.
 
         Args:
             text: Text for validation
 
         Returns:
-            Validation loss
+            Validation reward (higher = better)
         """
         tokens = self.encode_text(text)
         if not tokens:
             return -1.0
-        return self.compute_validation_loss(tokens)
+        return self.compute_validation_reward(tokens)
 
     def generate_token(self, tokens: List[int], temperature: float = None) -> tuple:
         """

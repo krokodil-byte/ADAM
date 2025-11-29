@@ -83,6 +83,8 @@
 // Include modular kernel files
 #include "vocabulary.cu"
 #include "venn_system.cu"
+#include "reward_system.cu"  // Reward-based learning (replaces cross-entropy)
+#include "reward_backward.cu"  // Reward-based backward pass
 
 typedef enum {
     MODE_EXTERNAL_INPUT = 0,
@@ -206,22 +208,34 @@ typedef struct {
     float* softmax_cache;     // [MAX_SEQ_LEN x TOTAL_VOCAB_SIZE] - cached softmax for backward
     float* grad_softmax;      // [MAX_SEQ_LEN x TOTAL_VOCAB_SIZE] - gradient buffer
 
+    // Reward system buffers (replaces loss)
+    float* topk_rewards;           // [MAX_SEQ_LEN] - Top-K accuracy rewards
+    int* topk_ranks;               // [MAX_SEQ_LEN] - Rank of target in top-K (for logging)
+    float* venn_rewards;           // [MAX_SEQ_LEN] - Venn semantic similarity rewards
+    float* venn_similarities;      // [MAX_SEQ_LEN] - Similarity scores (for logging)
+    float* final_rewards;          // [MAX_SEQ_LEN] - Combined rewards
+    float* avg_topk_reward;        // [1] - Average Top-K reward (for stats)
+    float* avg_venn_reward;        // [1] - Average Venn reward (for stats)
+    float* avg_final_reward;       // [1] - Average final reward (for stats)
+
     // Semantic navigation
     float* semantic_state;
     float* cluster_activations;
-    
+
     // Input/output
     int* current_sequence;
     int seq_len;
-    
+
     // Training parameters
     float learning_rate;
     float exploration_temperature;
     float momentum;
     unsigned long long random_seed;
-    
-    // Loss tracking
-    float current_loss;
+
+    // Reward tracking (replaces current_loss)
+    float current_reward;          // Average reward (higher = better, opposite of loss)
+    float current_topk_reward;     // Top-K component
+    float current_venn_reward;     // Venn component
 } LLMCore;
 
 typedef struct {
@@ -1335,30 +1349,85 @@ void* background_self_training(void* arg) {
                 system->gpu.main_stream
             );
             
-            // 2. LOSS COMPUTATION
-            // -------------------
-            
-            // Reset loss to zero BEFORE computation
-            cudaMemsetAsync(&system->llm.current_loss, 0, sizeof(float), 
-                           system->gpu.main_stream);
-            
-            // Compute cross-entropy (only over valid tokens)
-            dim3 grid_loss((seq_len + 255) / 256);
-            cross_entropy_loss_kernel<<<grid_loss, 256, 0, system->gpu.main_stream>>>(
+            // 2. REWARD COMPUTATION (replaces cross-entropy loss)
+            // ---------------------------------------------------
+
+            // Reset reward buffers to zero BEFORE computation
+            cudaMemsetAsync(system->llm.avg_topk_reward, 0, sizeof(float), system->gpu.main_stream);
+            cudaMemsetAsync(system->llm.avg_venn_reward, 0, sizeof(float), system->gpu.main_stream);
+            cudaMemsetAsync(system->llm.avg_final_reward, 0, sizeof(float), system->gpu.main_stream);
+
+            dim3 grid_reward((seq_len + 255) / 256);
+            dim3 block_reward(256);
+
+            // Compute Top-K accuracy reward
+            compute_topk_reward_kernel<<<grid_reward, block_reward, 0, system->gpu.main_stream>>>(
                 system->llm.logits,
                 system->llm.current_sequence,
                 system->llm.word_valid_mask,
-                &system->llm.current_loss,
+                system->llm.topk_rewards,
+                system->llm.topk_ranks,
                 seq_len,
-                TOTAL_VOCAB_SIZE
+                TOTAL_VOCAB_SIZE,
+                reward_top_k
             );
+
+            // Compute Venn semantic similarity reward
+            // Merge char and word embeddings for full token embeddings
+            // NOTE: This is simplified - in production we'd precompute this
+            compute_venn_reward_kernel<<<grid_reward, block_reward, 0, system->gpu.main_stream>>>(
+                system->llm.logits,
+                system->llm.current_sequence,
+                system->llm.word_valid_mask,
+                system->llm.char_embeddings,  // Use char embeddings as token embeddings (simplified)
+                system->venn.cluster_centers,
+                system->llm.venn_rewards,
+                system->llm.venn_similarities,
+                seq_len,
+                TOTAL_VOCAB_SIZE,
+                EMBED_DIM,
+                NUM_VENN_HEADS,
+                VENN_CLUSTERS
+            );
+
+            // Combine rewards
+            combine_rewards_kernel<<<grid_reward, block_reward, 0, system->gpu.main_stream>>>(
+                system->llm.topk_rewards,
+                system->llm.venn_rewards,
+                system->llm.final_rewards,
+                seq_len,
+                reward_alpha
+            );
+
+            // Compute average rewards (for stats/logging)
+            compute_reward_stats_kernel<<<grid_reward, block_reward, 0, system->gpu.main_stream>>>(
+                system->llm.topk_rewards,
+                system->llm.avg_topk_reward,
+                seq_len
+            );
+
+            compute_reward_stats_kernel<<<grid_reward, block_reward, 0, system->gpu.main_stream>>>(
+                system->llm.venn_rewards,
+                system->llm.avg_venn_reward,
+                seq_len
+            );
+
+            compute_reward_stats_kernel<<<grid_reward, block_reward, 0, system->gpu.main_stream>>>(
+                system->llm.final_rewards,
+                system->llm.avg_final_reward,
+                seq_len
+            );
+
+            // Copy final reward to current_reward for stats API (higher = better)
+            cudaMemcpyAsync(&system->llm.current_reward, system->llm.avg_final_reward,
+                           sizeof(float), cudaMemcpyDeviceToDevice, system->gpu.main_stream);
             
-            // 3. BACKWARD PASS
-            // ----------------
-            
+            // 3. REWARD-BASED BACKWARD PASS
+            // ------------------------------
+
             // Zero gradients (DUAL)
-            cudaMemsetAsync(system->llm.grad_output_weights, 0, 
-                           TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float), 
+            cudaMemsetAsync(system->llm.grad_output_weights, 0,
+                           TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float),
                            system->gpu.main_stream);
             cudaMemsetAsync(system->llm.grad_char_embeddings, 0,
                            CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float),
@@ -1366,26 +1435,31 @@ void* background_self_training(void* arg) {
             cudaMemsetAsync(system->llm.grad_word_embeddings, 0,
                            MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float),
                            system->gpu.main_stream);
-            
-            // Backward through output projection (only valid tokens)
+            cudaMemsetAsync(system->llm.grad_hidden_states, 0,
+                           runtime_max_seq_len * EMBED_DIM * sizeof(float),
+                           system->gpu.main_stream);
+
+            // Backward through output projection using reward signals
+            dim3 grid_backward((seq_len + 255) / 256);
             dim3 block_backward(256);
-            dim3 grid_backward(seq_len, (TOTAL_VOCAB_SIZE + 255) / 256);
-            output_projection_backward_kernel<<<grid_backward, block_backward, 0, system->gpu.main_stream>>>(
+
+            reward_output_backward_kernel<<<grid_backward, block_backward, 0, system->gpu.main_stream>>>(
                 system->llm.logits,
                 system->llm.current_sequence,
+                system->llm.final_rewards,  // Use final combined rewards
                 system->llm.word_valid_mask,
                 system->llm.hidden_states,
+                system->llm.output_weights,
                 system->llm.grad_output_weights,
                 system->llm.grad_hidden_states,
                 seq_len,
                 EMBED_DIM,
                 TOTAL_VOCAB_SIZE
             );
-            
+
             // Backward through embeddings (DUAL)
-            // OPTIMIZED: Use coalesced version for better memory access patterns
-            dim3 grid_emb_back(EMBED_DIM);  // One block per dimension
-            embedding_backward_coalesced_kernel<<<grid_emb_back, 256, 0, system->gpu.main_stream>>>(
+            dim3 grid_emb_back((seq_len + 255) / 256);
+            reward_embedding_backward_kernel<<<grid_emb_back, block_backward, 0, system->gpu.main_stream>>>(
                 system->llm.current_sequence,
                 system->llm.grad_hidden_states,
                 system->llm.grad_char_embeddings,
@@ -1696,6 +1770,26 @@ int init_system(void) {
     // Allocate optimized computation buffers (for cuBLAS backward)
     cudaMalloc(&g_system->llm.softmax_cache, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
     cudaMalloc(&g_system->llm.grad_softmax, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
+
+    // Allocate reward system buffers (replaces loss)
+    cudaMalloc(&g_system->llm.topk_rewards, max_seq_len * sizeof(float));
+    cudaMalloc(&g_system->llm.topk_ranks, max_seq_len * sizeof(int));
+    cudaMalloc(&g_system->llm.venn_rewards, max_seq_len * sizeof(float));
+    cudaMalloc(&g_system->llm.venn_similarities, max_seq_len * sizeof(float));
+    cudaMalloc(&g_system->llm.final_rewards, max_seq_len * sizeof(float));
+    cudaMalloc(&g_system->llm.avg_topk_reward, sizeof(float));
+    cudaMalloc(&g_system->llm.avg_venn_reward, sizeof(float));
+    cudaMalloc(&g_system->llm.avg_final_reward, sizeof(float));
+
+    // Initialize reward buffers to zero
+    cudaMemset(g_system->llm.topk_rewards, 0, max_seq_len * sizeof(float));
+    cudaMemset(g_system->llm.topk_ranks, 0, max_seq_len * sizeof(int));
+    cudaMemset(g_system->llm.venn_rewards, 0, max_seq_len * sizeof(float));
+    cudaMemset(g_system->llm.venn_similarities, 0, max_seq_len * sizeof(float));
+    cudaMemset(g_system->llm.final_rewards, 0, max_seq_len * sizeof(float));
+    cudaMemset(g_system->llm.avg_topk_reward, 0, sizeof(float));
+    cudaMemset(g_system->llm.avg_venn_reward, 0, sizeof(float));
+    cudaMemset(g_system->llm.avg_final_reward, 0, sizeof(float));
 
     // Allocate semantic navigation buffers
     cudaMalloc(&g_system->llm.semantic_state, EMBED_DIM * sizeof(float));
@@ -2133,16 +2227,24 @@ int get_token_probabilities(int* input_tokens, int num_tokens, float temperature
     return vocab_size;
 }
 
-void get_stats(long long* cycles, long long* tokens, float* temp, float* momentum, float* loss, float* perplexity) {
+void get_stats(long long* cycles, long long* tokens, float* temp, float* momentum,
+               float* reward, float* topk_reward, float* venn_reward) {
     if (!g_system) return;
     *cycles = g_system->self_training_cycles;
     *tokens = g_system->total_tokens_processed;
     *temp = g_system->llm.exploration_temperature;
     *momentum = g_system->llm.momentum;
-    
-    // Copy current loss from device
-    cudaMemcpy(loss, &g_system->llm.current_loss, sizeof(float), cudaMemcpyDeviceToHost);
-    *perplexity = expf(*loss);
+
+    // Copy current rewards from device (higher = better)
+    cudaMemcpy(reward, &g_system->llm.current_reward, sizeof(float), cudaMemcpyDeviceToHost);
+
+    // Copy component rewards for detailed logging
+    float topk_val, venn_val;
+    cudaMemcpy(&topk_val, g_system->llm.avg_topk_reward, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&venn_val, g_system->llm.avg_venn_reward, sizeof(float), cudaMemcpyDeviceToHost);
+
+    if (topk_reward) *topk_reward = topk_val;
+    if (venn_reward) *venn_reward = venn_val;
 }
 
 void set_reward(float reward) {
@@ -2487,44 +2589,87 @@ int feed_training_batch(const int* tokens, int batch_size) {
             g_system->gpu.main_stream
         );
         
-        // Compute loss
-        cudaMemset(&g_system->llm.current_loss, 0, sizeof(float));
-        dim3 block_loss(256);
-        dim3 grid_loss((chunk_size + 255) / 256);
-        cross_entropy_loss_kernel<<<grid_loss, block_loss>>>(
+        // Compute rewards (replaces loss)
+        cudaMemset(g_system->llm.avg_topk_reward, 0, sizeof(float));
+        cudaMemset(g_system->llm.avg_venn_reward, 0, sizeof(float));
+        cudaMemset(g_system->llm.avg_final_reward, 0, sizeof(float));
+
+        dim3 block_reward(256);
+        dim3 grid_reward((chunk_size + 255) / 256);
+
+        // Top-K reward
+        compute_topk_reward_kernel<<<grid_reward, block_reward>>>(
             g_system->llm.logits,
             g_system->llm.current_sequence,
             g_system->llm.word_valid_mask,
-            &g_system->llm.current_loss,
+            g_system->llm.topk_rewards,
+            g_system->llm.topk_ranks,
             chunk_size,
-            TOTAL_VOCAB_SIZE
+            TOTAL_VOCAB_SIZE,
+            reward_top_k
         );
-        
-        // Backward: Output projection (DUAL gradients)
+
+        // Venn semantic reward
+        compute_venn_reward_kernel<<<grid_reward, block_reward>>>(
+            g_system->llm.logits,
+            g_system->llm.current_sequence,
+            g_system->llm.word_valid_mask,
+            g_system->llm.char_embeddings,
+            g_system->venn.cluster_centers,
+            g_system->llm.venn_rewards,
+            g_system->llm.venn_similarities,
+            chunk_size,
+            TOTAL_VOCAB_SIZE,
+            EMBED_DIM,
+            NUM_VENN_HEADS,
+            VENN_CLUSTERS
+        );
+
+        // Combine rewards
+        combine_rewards_kernel<<<grid_reward, block_reward>>>(
+            g_system->llm.topk_rewards,
+            g_system->llm.venn_rewards,
+            g_system->llm.final_rewards,
+            chunk_size,
+            reward_alpha
+        );
+
+        // Compute stats
+        compute_reward_stats_kernel<<<grid_reward, block_reward>>>(
+            g_system->llm.final_rewards,
+            g_system->llm.avg_final_reward,
+            chunk_size
+        );
+
+        cudaMemcpy(&g_system->llm.current_reward, g_system->llm.avg_final_reward,
+                   sizeof(float), cudaMemcpyDeviceToDevice);
+
+        // Backward: Output projection using rewards
         cudaMemset(g_system->llm.grad_output_weights, 0, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
         cudaMemset(g_system->llm.grad_hidden_states, 0, chunk_size * EMBED_DIM * sizeof(float));
 
         dim3 block_out(256);
-        dim3 grid_out((chunk_size * TOTAL_VOCAB_SIZE + 255) / 256);
-        output_projection_backward_kernel<<<grid_out, block_out>>>(
+        dim3 grid_out((chunk_size + 255) / 256);
+        reward_output_backward_kernel<<<grid_out, block_out>>>(
             g_system->llm.logits,
             g_system->llm.current_sequence,
+            g_system->llm.final_rewards,
             g_system->llm.word_valid_mask,
             g_system->llm.hidden_states,
+            g_system->llm.output_weights,
             g_system->llm.grad_output_weights,
             g_system->llm.grad_hidden_states,
             chunk_size,
             EMBED_DIM,
             TOTAL_VOCAB_SIZE
         );
-        
+
         // Backward: Embeddings (DUAL)
-        // OPTIMIZED: Use coalesced version for better memory access patterns
         cudaMemset(g_system->llm.grad_char_embeddings, 0, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
         cudaMemset(g_system->llm.grad_word_embeddings, 0, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
 
-        dim3 grid_emb_coalesced(EMBED_DIM);  // One block per dimension
-        embedding_backward_coalesced_kernel<<<grid_emb_coalesced, 256>>>(
+        dim3 grid_emb_backward((chunk_size + 255) / 256);
+        reward_embedding_backward_kernel<<<grid_emb_backward, block_out>>>(
             g_system->llm.current_sequence,
             g_system->llm.grad_hidden_states,
             g_system->llm.grad_char_embeddings,
