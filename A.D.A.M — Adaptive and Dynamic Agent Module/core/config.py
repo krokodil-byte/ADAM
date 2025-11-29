@@ -230,6 +230,22 @@ def get_config_preset(preset_name: str = "default"):
     """Ottieni preset di configurazione"""
 
     presets = {
+        "none": {
+            # Empty preset - doesn't modify anything (keeps TUI settings)
+            "training": TrainingConfig(
+                # No changes - will use TUI settings
+            ),
+            "model": ModelConfig(
+                # No changes - will use TUI settings
+            ),
+            "performance": PerformanceConfig(
+                # No changes - will use TUI settings
+            ),
+            "vocab_optimization": VocabOptimizationConfig(
+                # No changes - will use TUI settings
+            ),
+        },
+
         "default": {
             "training": TrainingConfig(),
             "model": ModelConfig(),
@@ -247,7 +263,11 @@ def get_config_preset(preset_name: str = "default"):
                 AUTO_SAVE_FREQUENCY=500,  # More frequent saves
             ),
             "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+                # Only Venn and vocabulary parameters
                 WORD_CREATION_THRESHOLD=3,  # Accept words faster
+                VENN_PROPAGATION_FACTOR=0.2,
+                VENN_INTERSECTION_THRESHOLD=0.3,
             ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
@@ -261,7 +281,11 @@ def get_config_preset(preset_name: str = "default"):
                 VENN_UPDATE_FREQUENCY=200
             ),
             "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+                # Only Venn and vocabulary parameters
                 WORD_PRUNING_THRESHOLD=2,  # In stable mode, prune rarely used words
+                VENN_PROPAGATION_FACTOR=0.15,  # Lower propagation for stability
+                VENN_INTERSECTION_THRESHOLD=0.4,
             ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
@@ -274,7 +298,10 @@ def get_config_preset(preset_name: str = "default"):
                 EXPLORATION_TEMPERATURE=0.5,
             ),
             "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+                # Only Venn and vocabulary parameters
                 WORD_CREATION_THRESHOLD=0,  # No new words during inference
+                VENN_UPDATE_FREQUENCY=0,  # No Venn updates during inference
             ),
             "performance": PerformanceConfig(
                 USE_FUSED_KERNELS=True,
@@ -295,8 +322,12 @@ def get_config_preset(preset_name: str = "default"):
                 AUTO_SAVE_FREQUENCY=100,  # Frequent checkpoints for experiments
             ),
             "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+                # Only Venn and vocabulary parameters
                 WORD_CREATION_THRESHOLD=2,  # More aggressive word creation
                 VENN_PROPAGATION_FACTOR=0.3,  # Higher semantic propagation
+                VENN_INTERSECTION_THRESHOLD=0.25,
+                VENN_ACTIVATION_TEMPERATURE=1.2,
             ),
             "performance": PerformanceConfig(),
             "vocab_optimization": VocabOptimizationConfig(),
@@ -308,7 +339,9 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.0001,
                 MOMENTUM=0.9,
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+            ),
             "performance": PerformanceConfig(
                 USE_CUBLAS=True,
                 USE_CUBLAS_BACKWARD=True,
@@ -328,7 +361,9 @@ def get_config_preset(preset_name: str = "default"):
             "training": TrainingConfig(
                 BASE_LR=0.0001,
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+            ),
             "performance": PerformanceConfig(
                 USE_CUBLAS=True,
                 USE_FUSED_KERNELS=True,  # Reduces intermediate memory
@@ -346,7 +381,9 @@ def get_config_preset(preset_name: str = "default"):
                 BASE_LR=0.0001,
                 VENN_UPDATE_FREQUENCY=200,  # Less frequent updates
             ),
-            "model": ModelConfig(),
+            "model": ModelConfig(
+                # Architecture NOT modified by presets (use TUI settings)
+            ),
             "performance": PerformanceConfig(
                 USE_CUBLAS=True,
                 USE_CUBLAS_BACKWARD=True,
@@ -449,7 +486,37 @@ def load_tui_settings():
 
         loaded_count = 0
 
-        # Apply MODEL settings
+        # Apply ARCHITECTURE settings
+        if 'architecture' in settings:
+            for key, value in settings['architecture'].items():
+                if hasattr(MODEL_CONFIG, key.upper()):
+                    setattr(MODEL_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(MODEL_CONFIG, key):
+                    setattr(MODEL_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Apply VENN settings
+        if 'venn' in settings:
+            for key, value in settings['venn'].items():
+                if hasattr(MODEL_CONFIG, key.upper()):
+                    setattr(MODEL_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(MODEL_CONFIG, key):
+                    setattr(MODEL_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Apply VOCABULARY settings
+        if 'vocabulary' in settings:
+            for key, value in settings['vocabulary'].items():
+                if hasattr(MODEL_CONFIG, key.upper()):
+                    setattr(MODEL_CONFIG, key.upper(), value)
+                    loaded_count += 1
+                elif hasattr(MODEL_CONFIG, key):
+                    setattr(MODEL_CONFIG, key, value)
+                    loaded_count += 1
+
+        # Legacy: Apply MODEL settings (old format compatibility)
         if 'model' in settings:
             for key, value in settings['model'].items():
                 if hasattr(MODEL_CONFIG, key.upper()):
