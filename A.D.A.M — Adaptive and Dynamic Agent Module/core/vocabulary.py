@@ -1,13 +1,79 @@
 #!/usr/bin/env python3
 """
-VectLLM Dynamic Vocabulary System
+VectLLM Dynamic Vocabulary System - Hot/Cold Architecture
+==========================================================
 
-Sistema a due livelli:
-- Livello 1: 256 char embeddings (fisso)
-- Livello 2: Word embeddings (dinamico, cresce on-demand)
+This module implements A.D.A.M's dynamic vocabulary with unlimited growth
+and efficient GPU/RAM hybrid storage.
 
-Pipeline:
-  "hello world" → split → ["hello", "world"] → [257, 32, 258]
+Architecture Tiers:
+-------------------
+
+Tier 1 - Character Fallback (256 tokens, always on GPU):
+    - IDs: 0-255
+    - Covers all ASCII/UTF-8 characters
+    - Ensures no out-of-vocabulary (OOV) tokens
+    - Always available for unknown sequences
+
+Tier 2 - Hot Vocabulary (10,000 words, GPU-resident):
+    - IDs: 256-10255
+    - Most frequently used words
+    - Fast GPU access via lookup table
+    - LRU eviction when full
+
+Tier 3 - Cold Vocabulary (unlimited, RAM-resident):
+    - IDs: 10256+
+    - Less frequent words
+    - Embeddings computed from character composition
+    - Promoted to hot vocab on demand
+
+Token ID Space:
+    [0-255]       Characters (always hot)
+    [256-10255]   Hot words (GPU)
+    [10256+]      Cold words (RAM)
+
+Word Creation Process:
+----------------------
+1. Track character sequences: "hello" appears in text
+2. Count frequency: increment counter each time seen
+3. Threshold check: if frequency >= WORD_CREATION_THRESHOLD (default: 5)
+4. Create word token: assign new ID, compute initial embedding
+5. Add to cold vocab: store in RAM
+6. Promote to hot: if used frequently, swap to GPU via LRU
+
+Encoding Examples:
+------------------
+    Input: "Hello world!"
+
+    Before word learning:
+        ['H','e','l','l','o',' ','w','o','r','l','d','!']
+        → [72,101,108,108,111,32,119,111,114,108,100,33]
+
+    After learning "Hello" (ID 256) and "world" (ID 257):
+        ['Hello',' ','world','!']
+        → [256,32,257,33]
+
+Key Features:
+-------------
+- Zero OOV: Characters always available as fallback
+- Online learning: Words created during training
+- Memory efficient: Hot/cold split minimizes GPU usage
+- Frequency-based: Common words cached on GPU
+- Pruning: Rarely used words can be removed (optional)
+
+Classes:
+--------
+- DynamicVocabulary: Main vocabulary manager
+  - encode_text(): Text → token IDs
+  - decode_tokens(): Token IDs → text
+  - create_word(): Create new word token
+  - sync_with_gpu(): Sync hot vocab with CUDA
+
+See Also:
+---------
+- kernels/vocabulary.cu: GPU-side vocabulary management
+- core/brain_wrapper.py: VectLLMBrain (uses this class)
+- core/config.py: Vocabulary configuration
 """
 
 import numpy as np
@@ -25,7 +91,44 @@ logger = logging.getLogger(__name__)
 
 class DynamicVocabulary:
     """
-    Vocabolario dinamico con caratteri fissi e parole che crescono.
+    Dynamic Vocabulary Manager with Hot/Cold Architecture
+    ======================================================
+
+    Manages A.D.A.M's three-tier vocabulary system:
+    - Character fallback (256 tokens, always GPU)
+    - Hot vocabulary (10,000 words, GPU)
+    - Cold vocabulary (unlimited, RAM)
+
+    Key Methods:
+        encode_text(text): Convert text to token IDs
+        decode_tokens(ids): Convert token IDs to text
+        create_word(word): Create new word token
+        is_word_created(word): Check if word has token ID
+        sync_with_gpu(brain): Sync hot vocab with CUDA kernel
+        save_vocab(path): Save vocabulary to disk
+        load_vocab(path): Load vocabulary from disk
+
+    Internal State:
+        word_to_id: str → int mapping
+        id_to_word: int → str mapping
+        frequency: Word usage frequency counters
+        char_sequences: Character sequence frequency tracking
+        hot_vocab_set: Set of GPU-resident word IDs
+        cold_embeddings: RAM embeddings for cold words
+
+    Example:
+        vocab = DynamicVocabulary(embed_dim=768)
+
+        # Encode text
+        text = "Hello world! Hello again!"
+        token_ids = vocab.encode_text(text)
+
+        # After 5 occurrences of "Hello", it becomes a word token
+        # token_ids changes from [72,101,108,108,111,...] to [256,...]
+
+        # Decode back
+        decoded = vocab.decode_tokens(token_ids)
+        # decoded == "Hello world! Hello again!"
     """
     
     def __init__(self, 

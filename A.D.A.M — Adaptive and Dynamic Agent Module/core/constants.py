@@ -1,69 +1,96 @@
 #!/usr/bin/env python3
 """
-VectLLM Constants
-Centralized constants and magic numbers
+VectLLM Constants (DEPRECATED - Use config.py)
+===============================================
+
+This module is DEPRECATED. All constants have been moved to core/config.py
+for better organization and centralization.
+
+Migration Guide:
+    # Old (deprecated):
+    from core.constants import DEFAULT_EMBED_DIM
+
+    # New (recommended):
+    from core.config import ASCII_SPACE, NUMBER_THRESHOLDS, CHECKPOINT_VERSION
+
+For configuration values, use:
+    from core.config import MODEL_CONFIG, TRAINING_CONFIG
+
+    print(MODEL_CONFIG.EMBED_DIM)  # Instead of DEFAULT_EMBED_DIM
+
+This file is kept for backward compatibility only.
 """
 
-# ASCII Characters
-ASCII_SPACE = 32
-ASCII_NEWLINE = 10
-ASCII_TAB = 9
-ASCII_CR = 13
+# Re-export constants from config.py for backward compatibility
+from .config import (
+    # ASCII Characters
+    ASCII_SPACE,
+    ASCII_NEWLINE,
+    ASCII_TAB,
+    ASCII_CR,
 
-# Default Model Configuration
+    # Checkpoint Magic Numbers
+    CHECKPOINT_VERSION,
+    MAGIC_V3,
+    MAGIC_V2,
+    MAGIC_V1,
+
+    # File Extensions
+    CHECKPOINT_EXT,
+    VOCAB_EXT,
+    FREQ_EXT,
+    METADATA_EXT,
+
+    # Formatting
+    NUMBER_THRESHOLDS,
+)
+
+# Legacy default values (now in ModelConfig, TrainingConfig, etc.)
+# Use config.py dataclasses instead of these constants
 DEFAULT_EMBED_DIM = 768
 DEFAULT_NUM_HEADS = 12
 DEFAULT_NUM_LAYERS = 6
 DEFAULT_MAX_SEQ_LEN = 512
-
-# Vocabulary Defaults
 DEFAULT_CHAR_VOCAB_SIZE = 256
 DEFAULT_MAX_WORD_VOCAB_SIZE = 100000
 DEFAULT_WORD_CREATION_THRESHOLD = 5
 DEFAULT_WORD_PRUNING_THRESHOLD = 2
 DEFAULT_MAX_WORD_LENGTH = 20
-
-# Venn Semantic System
 DEFAULT_VENN_CLUSTERS = 256
 DEFAULT_INTERSECTION_THRESHOLD = 0.5
 DEFAULT_CLUSTER_UPDATE_LR = 0.1
 DEFAULT_EPISODIC_BUFFER_SIZE = 1024
-
-# Training Defaults
 DEFAULT_BASE_LR = 0.0001
 DEFAULT_EMBEDDING_LR_SCALE = 0.1
 DEFAULT_MOMENTUM = 0.9
 DEFAULT_EXPLORATION_TEMPERATURE = 1.0
-
-# Update Frequencies
 DEFAULT_VENN_UPDATE_FREQUENCY = 100
 DEFAULT_STATS_SYNC_FREQUENCY = 10
 DEFAULT_VOCAB_PRUNING_FREQUENCY = 10000
-
-# Sleep Timings (microseconds)
 DEFAULT_SELF_LOOP_SLEEP_US = 5000
 DEFAULT_EXTERNAL_INPUT_SLEEP_US = 100000
-
-# Checkpoint
 DEFAULT_AUTO_CHECKPOINT_INTERVAL = 100
-CHECKPOINT_VERSION = 3
-MAGIC_V3 = "VECTLLM3"
-MAGIC_V2 = "VECTLLM2"
-MAGIC_V1 = "VECTLLM"
-
-# File Extensions
-CHECKPOINT_EXT = ".ckpt"
-VOCAB_EXT = ".vocab"
-FREQ_EXT = ".freq"
-METADATA_EXT = ".json"
-
-# Stats
 DEFAULT_STATS_WINDOW_SIZE = 100
 DEFAULT_LOSS_HISTORY_SIZE = 1000
 
-# Formatting
-NUMBER_THRESHOLDS = {
-    'K': 1_000,
-    'M': 1_000_000,
-    'B': 1_000_000_000,
-}
+__all__ = [
+    # Active constants (from config.py)
+    'ASCII_SPACE', 'ASCII_NEWLINE', 'ASCII_TAB', 'ASCII_CR',
+    'CHECKPOINT_VERSION', 'MAGIC_V3', 'MAGIC_V2', 'MAGIC_V1',
+    'CHECKPOINT_EXT', 'VOCAB_EXT', 'FREQ_EXT', 'METADATA_EXT',
+    'NUMBER_THRESHOLDS',
+
+    # Deprecated (use config.py dataclasses)
+    'DEFAULT_EMBED_DIM', 'DEFAULT_NUM_HEADS', 'DEFAULT_NUM_LAYERS',
+    'DEFAULT_MAX_SEQ_LEN', 'DEFAULT_CHAR_VOCAB_SIZE',
+    'DEFAULT_MAX_WORD_VOCAB_SIZE', 'DEFAULT_WORD_CREATION_THRESHOLD',
+    'DEFAULT_WORD_PRUNING_THRESHOLD', 'DEFAULT_MAX_WORD_LENGTH',
+    'DEFAULT_VENN_CLUSTERS', 'DEFAULT_INTERSECTION_THRESHOLD',
+    'DEFAULT_CLUSTER_UPDATE_LR', 'DEFAULT_EPISODIC_BUFFER_SIZE',
+    'DEFAULT_BASE_LR', 'DEFAULT_EMBEDDING_LR_SCALE', 'DEFAULT_MOMENTUM',
+    'DEFAULT_EXPLORATION_TEMPERATURE', 'DEFAULT_VENN_UPDATE_FREQUENCY',
+    'DEFAULT_STATS_SYNC_FREQUENCY', 'DEFAULT_VOCAB_PRUNING_FREQUENCY',
+    'DEFAULT_SELF_LOOP_SLEEP_US', 'DEFAULT_EXTERNAL_INPUT_SLEEP_US',
+    'DEFAULT_AUTO_CHECKPOINT_INTERVAL', 'DEFAULT_STATS_WINDOW_SIZE',
+    'DEFAULT_LOSS_HISTORY_SIZE',
+]

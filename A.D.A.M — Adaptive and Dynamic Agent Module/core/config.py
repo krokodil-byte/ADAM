@@ -1,56 +1,184 @@
 #!/usr/bin/env python3
 """
-VectLLM Configuration
-Tutti i parametri modificabili del modello
+VectLLM Configuration System
+============================
+
+This module centralizes ALL configuration for the A.D.A.M (Adaptive and Dynamic Agent Module).
+It provides a clean dataclass-based config system with preset support and TUI integration.
+
+Architecture:
+- ModelConfig: Model architecture (layers, dimensions, vocab, Venn system)
+- TrainingConfig: Learning rates, batch sizes, validation
+- PerformanceConfig: GPU optimizations, cuBLAS, memory settings
+- GenerationConfig: Text generation parameters
+- CheckpointConfig: Model persistence
+- RuntimeConfig: GPU device, compilation flags
+- VocabOptimizationConfig: Hot/cold vocab architecture
+
+Key Features:
+- TUI integration: Settings from ~/.adam/tui_settings.json
+- Preset system: Pre-configured settings for different use cases
+- Architecture protection: Presets NEVER override TUI architecture settings
+- Dynamic compilation: Config values injected into CUDA #define at compile time
+
+Usage:
+    from core.config import MODEL_CONFIG, TRAINING_CONFIG
+
+    # Load TUI settings (if available)
+    load_tui_settings()
+
+    # Apply preset (preserves TUI architecture)
+    set_config_from_preset('fast_learning')
+
+    # Access settings
+    print(MODEL_CONFIG.NUM_LAYERS)  # 6 (or TUI value)
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 
 
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+# These constants are used throughout the codebase for magic numbers and
+# file format specifications.
+
+# ASCII Characters
+ASCII_SPACE = 32
+ASCII_NEWLINE = 10
+ASCII_TAB = 9
+ASCII_CR = 13
+
+# Checkpoint Magic Numbers (for backward compatibility detection)
+CHECKPOINT_VERSION = 3
+MAGIC_V3 = "VECTLLM3"
+MAGIC_V2 = "VECTLLM2"
+MAGIC_V1 = "VECTLLM"
+
+# File Extensions
+CHECKPOINT_EXT = ".ckpt"
+VOCAB_EXT = ".vocab"
+FREQ_EXT = ".freq"
+METADATA_EXT = ".json"
+
+# Formatting thresholds for human-readable numbers (1.2K, 3.5M, etc.)
+NUMBER_THRESHOLDS = {
+    'K': 1_000,
+    'M': 1_000_000,
+    'B': 1_000_000_000,
+}
+
+
+# ============================================================================
+# CONFIGURATION CLASSES
+# ============================================================================
+
+
 @dataclass
 class ModelConfig:
-    """Configurazione architettura del modello"""
+    """
+    Model Architecture Configuration
+    =================================
 
-    # Dimensioni modello
-    EMBED_DIM: int = 768
-    NUM_HEADS: int = 12
-    NUM_LAYERS: int = 6
-    MAX_SEQ_LEN: int = 512
+    Controls the fundamental architecture of the transformer model.
 
-    # Vocabolario dinamico
-    CHAR_VOCAB_SIZE: int = 256  # ASCII/UTF-8 base
-    WORD_CREATION_THRESHOLD: int = 5  # Crea word token dopo N occorrenze (evita spam)
-    WORD_PRUNING_THRESHOLD: int = 0  # 0 = mai pruning, cold vocab infinito (la RAM è abbondante!)
-    MAX_WORD_LENGTH: int = 20  # Massima lunghezza parola in char (sanity check)
-    MAX_WORD_VOCAB_SIZE: int = 10000  # MUST match CUDA's MAX_WORD_VOCAB_SIZE (hot vocab only, cold is unlimited)
+    IMPORTANT: These architecture parameters are NEVER overridden by presets.
+    They can only be set via TUI (Text User Interface) to ensure consistent
+    model architecture across training sessions.
 
-    # Venn Semantic System - Multi-Head Architecture
-    ENABLE_VENN_MULTIHEAD: bool = True  # Enable Multi-Head Venn (revolutionary!)
-    NUM_VENN_HEADS: int = 12  # Number of Venn heads (matches NUM_HEADS for symmetry)
-    VENN_CLUSTERS_PER_HEAD: int = 256  # Clusters per head (total: NUM_VENN_HEADS × VENN_CLUSTERS_PER_HEAD)
-    VENN_CLUSTERS: int = 256  # Backward compatibility (used only if ENABLE_VENN_MULTIHEAD=False)
+    Architecture Parameters:
+    - EMBED_DIM: Embedding dimension (must be divisible by NUM_HEADS)
+    - NUM_HEADS: Number of attention heads
+    - NUM_LAYERS: Number of transformer layers
+    - MAX_SEQ_LEN: Maximum sequence length for positional encoding
+
+    Vocabulary System:
+    A.D.A.M uses a hot/cold vocabulary architecture:
+    - Hot vocab (GPU): 10,000 most frequent words (fast access)
+    - Cold vocab (RAM): Unlimited size (LRU eviction to hot)
+    - Character fallback: 256 ASCII/UTF-8 characters (always available)
+
+    Venn Semantic System:
+    Multi-head semantic clustering for context-aware representations:
+    - Each head maintains its own cluster space
+    - Tokens can have soft membership across multiple clusters
+    - Clusters are updated online during training
+    """
+
+    # ========================================
+    # Model Dimensions (TUI-controlled)
+    # ========================================
+    EMBED_DIM: int = 768        # Embedding dimension
+    NUM_HEADS: int = 12         # Attention heads (EMBED_DIM must be divisible by this)
+    NUM_LAYERS: int = 6         # Transformer layers
+    MAX_SEQ_LEN: int = 512      # Maximum sequence length
+
+    # ========================================
+    # Dynamic Vocabulary (Hot/Cold Architecture)
+    # ========================================
+    CHAR_VOCAB_SIZE: int = 256                  # ASCII/UTF-8 character set (always available)
+    WORD_CREATION_THRESHOLD: int = 5            # Create word token after N char sequence occurrences
+    WORD_PRUNING_THRESHOLD: int = 0             # Pruning threshold (0 = never prune cold vocab)
+    MAX_WORD_LENGTH: int = 20                   # Max word length in characters (sanity check)
+    MAX_WORD_VOCAB_SIZE: int = 10000            # Hot vocab size (MUST match CUDA #define)
+
+    # ========================================
+    # Venn Semantic System - Multi-Head
+    # ========================================
+    # The Venn system creates semantic clusters that capture token meanings.
+    # Multi-head architecture allows different semantic perspectives.
+
+    ENABLE_VENN_MULTIHEAD: bool = True          # Enable multi-head Venn (recommended)
+    NUM_VENN_HEADS: int = 12                    # Number of Venn heads (matches NUM_HEADS)
+    VENN_CLUSTERS_PER_HEAD: int = 256           # Clusters per head
+    VENN_CLUSTERS: int = 256                    # Legacy: total clusters if single-head
 
     # Venn Activation & Propagation
-    VENN_PROPAGATION_FACTOR: float = 0.2  # Quanto le attivazioni si propagano tra cluster vicini (0.0-1.0)
-    VENN_INTERSECTION_THRESHOLD: float = 0.3  # Threshold per considerare cluster "connessi" (0.0-1.0)
-    MAX_PROPAGATED_ACTIVATION: float = 5.0  # Cap massimo per attivazioni propagate
-    VENN_ACTIVATION_TEMPERATURE: float = 1.0  # Temperature per Gaussian activation (più alto = più broad)
+    VENN_PROPAGATION_FACTOR: float = 0.2        # Activation spread to nearby clusters (0.0-1.0)
+    VENN_INTERSECTION_THRESHOLD: float = 0.3    # Threshold for cluster connectivity (0.0-1.0)
+    MAX_PROPAGATED_ACTIVATION: float = 5.0      # Maximum activation after propagation
+    VENN_ACTIVATION_TEMPERATURE: float = 1.0    # Gaussian activation temperature (higher = broader)
 
     # Venn Membership Weights
-    PRIMARY_MEMBERSHIP_WEIGHT: float = 0.6  # Peso per cluster primario (più vicino)
-    SECONDARY_MEMBERSHIP_WEIGHT: float = 0.4  # Peso per cluster secondario
+    PRIMARY_MEMBERSHIP_WEIGHT: float = 0.6      # Weight for primary (nearest) cluster
+    SECONDARY_MEMBERSHIP_WEIGHT: float = 0.4    # Weight for secondary cluster
 
     # Venn Cluster Updates
-    CLUSTER_UPDATE_LR: float = 0.1  # Learning rate per aggiornamento centri cluster
+    CLUSTER_UPDATE_LR: float = 0.1              # Learning rate for cluster center updates
 
+    # ========================================
     # Episodic Memory
-    EPISODIC_BUFFER_SIZE: int = 1024
+    # ========================================
+    EPISODIC_BUFFER_SIZE: int = 1024            # Size of episodic memory buffer (TUI-controlled)
 
 
 @dataclass
 class VocabOptimizationConfig:
-    """Configurazione ottimizzazione vocabolario CPU/GPU hybrid"""
+    """
+    Vocabulary Optimization Configuration
+    ======================================
+
+    Controls the hot/cold vocabulary architecture for efficient GPU/RAM usage.
+
+    Hot/Cold Architecture:
+    - Hot vocab (GPU): 10,000 most frequently used words for fast access
+    - Cold vocab (RAM): Unlimited size, swapped to hot via LRU eviction
+    - Pre-loading: Batch load cold words to hot before forward pass
+    - Deferred sync: Batch GPU syncs to avoid contention during training
+
+    Performance Features:
+    - Batch operations for multi-word sync (single GPU call)
+    - Cached char embeddings (refresh periodically)
+    - Numpy batch ops for cold vocab embedding computation
+    - AMD Smart Access Memory (SAM) support
+    - CUDA Unified Memory (experimental)
+
+    Persistence:
+    - Cold vocab saved to disk alongside checkpoints
+    - Optional compression (.npz) - trades speed for disk space
+    - Auto-load from checkpoint
+    """
 
     # Master switch
     ENABLE_VOCAB_OPTIMIZATION: bool = True  # Enable optimized sync path
@@ -92,7 +220,28 @@ class VocabOptimizationConfig:
 
 @dataclass
 class TrainingConfig:
-    """Configurazione training"""
+    """
+    Training Configuration
+    ======================
+
+    Controls all training hyperparameters and update frequencies.
+
+    Learning Rates:
+    - BASE_LR: Applied to transformer weights
+    - EMBEDDING_LR_SCALE: Embeddings learn slower (10% of base)
+    - OUTPUT_LR_SCALE: Output projection at full speed
+
+    Validation:
+    - Supports both per-pass and periodic validation
+    - Early stopping with patience
+    - Configurable train/val split
+
+    Update Frequencies:
+    - VENN_UPDATE_FREQUENCY: How often to update semantic clusters
+    - STATS_SYNC_FREQUENCY: How often to sync GPU stats to CPU
+
+    Presets can modify these parameters (but never architecture params).
+    """
 
     # Learning rates
     BASE_LR: float = 0.0001  # Conservative per training continuo
@@ -127,7 +276,32 @@ class TrainingConfig:
 
 @dataclass
 class PerformanceConfig:
-    """Configurazione ottimizzazioni GPU (Tier 1 & 2)"""
+    """
+    Performance & GPU Optimization Configuration
+    ============================================
+
+    Controls CUDA optimizations, memory management, and compute pipeline.
+
+    cuBLAS Optimizations:
+    - Matrix multiplications offloaded to cuBLAS (NVIDIA tuned)
+    - Backward pass gradient computation via cuBLAS
+
+    Fused Kernels:
+    - Attention + FFN fusion (reduces kernel launches)
+    - Embedding + LayerNorm fusion
+
+    Pipeline Modes:
+    - disabled: Sequential execution (lowest memory, lowest throughput)
+    - double: Overlap compute with H2D/D2H (balanced)
+    - triple: Maximum parallelism (highest throughput, highest memory)
+
+    Memory Management:
+    - Pinned memory for faster CPU<->GPU transfers
+    - Pre-allocated buffers (avoid runtime malloc overhead)
+    - Warp primitives for efficient GPU reductions
+
+    Target GPU utilization: 80-95% (configurable)
+    """
 
     # cuBLAS optimizations
     USE_CUBLAS: bool = True  # Use cuBLAS for matrix operations
@@ -168,7 +342,29 @@ class PerformanceConfig:
 
 @dataclass
 class GenerationConfig:
-    """Configurazione generazione testo con continuation bias"""
+    """
+    Text Generation Configuration
+    ==============================
+
+    Controls text generation behavior with confidence-based stopping.
+
+    Continuation Bias:
+    A.D.A.M uses continuation bias instead of traditional length limits.
+    The model stops generating when token confidence drops below threshold.
+
+    Key Parameters:
+    - MIN_TOKEN_CONFIDENCE: Stop when token probability < this value
+    - CONFIDENCE_DECAY: Exponential moving average for confidence tracking
+    - LOW_CONFIDENCE_STREAK: Stop after N consecutive low-confidence tokens
+
+    This approach produces more natural, contextually-appropriate responses
+    compared to fixed max_tokens limits.
+
+    Temperature:
+    - Lower (0.5-0.7): Focused, deterministic outputs
+    - Medium (0.8-1.2): Balanced creativity
+    - Higher (1.5-2.0): Exploratory, diverse outputs
+    """
 
     # Temperature per sampling
     TEMPERATURE: float = 1.0

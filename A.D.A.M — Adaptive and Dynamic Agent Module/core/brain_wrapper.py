@@ -1,7 +1,41 @@
 #!/usr/bin/env python3
 """
-VectLLM Brain Wrapper
-Interfaccia Python per il kernel CUDA con supporto vocabolario dinamico
+VectLLM Brain Wrapper - Python ↔ CUDA Bridge
+=============================================
+
+This module provides the Python interface to A.D.A.M's CUDA kernel.
+
+Key Responsibilities:
+1. Dynamic CUDA Compilation: Injects TUI architecture params into kernel before compilation
+2. Vocabulary Management: Bridges Python's DynamicVocabulary with CUDA's hot/cold system
+3. Training Pipeline: Orchestrates forward/backward passes with the GPU
+4. Memory Management: Handles CPU↔GPU data transfers
+5. Stats Collection: Syncs training metrics from GPU to Python
+
+Architecture Flow:
+==================
+
+Configuration Loading:
+    TUI Settings (JSON) → MODEL_CONFIG → CUDACompiler → NVCC → Compiled Kernel
+
+Training Loop:
+    Python Batch → VectLLMBrain.train() → CUDA kernel → Gradients → Python Stats
+
+Vocabulary Sync:
+    CUDA Hot Vocab ← → Python Vocab Manager → Cold Vocab (RAM)
+
+Classes:
+--------
+- CUDACompiler: Handles kernel compilation with dynamic parameter injection
+- VectLLMBrain: Main interface to the CUDA kernel
+- AsyncBatchLoader: Asynchronous batch preprocessing (if pipeline enabled)
+- PipelinedTrainer: Multi-threaded training pipeline (if pipeline enabled)
+
+See Also:
+---------
+- kernels/brain.cu: CUDA kernel implementation
+- core/vocabulary.py: Python vocabulary management
+- core/config.py: Configuration system
 """
 
 import os
@@ -51,7 +85,39 @@ def detect_gpu_vendor() -> str:
 
 
 class CUDACompiler:
-    """Compilatore automatico del kernel CUDA"""
+    """
+    CUDA Kernel Compiler with Dynamic Architecture Injection
+    =========================================================
+
+    This class handles compilation of the CUDA kernel with architecture parameters
+    injected from the configuration system (TUI settings).
+
+    How It Works:
+    1. Reads kernels/brain.cu source code
+    2. Replaces #define placeholders with actual MODEL_CONFIG values
+    3. Writes modified source to temporary file
+    4. Compiles with nvcc
+    5. Caches compiled .so library
+
+    Cache Invalidation:
+    The cache hash includes:
+    - Source code content
+    - Architecture parameters (NUM_LAYERS, EMBED_DIM, NUM_HEADS, MAX_SEQ_LEN)
+    - Venn parameters (VENN_CLUSTERS, NUM_VENN_HEADS, EPISODIC_BUFFER_SIZE)
+
+    When any of these change, the kernel is automatically recompiled.
+
+    Example:
+        compiler = CUDACompiler()
+        lib_path = compiler.compile(kernel_path)
+        # Returns cached .so or compiles fresh if architecture changed
+
+    Methods:
+        compile(kernel_path, force=False): Compile kernel with current config
+        get_cache_path(kernel_path): Get path to cached library
+        find_nvcc(): Locate nvcc compiler
+        detect_gpu_arch(): Detect GPU compute capability
+    """
 
     def __init__(self):
         self.cache_dir = RUNTIME_CONFIG.CACHE_DIR
@@ -190,8 +256,57 @@ class CUDACompiler:
 
 class VectLLMBrain:
     """
-    Wrapper Python per il kernel CUDA VectLLM.
-    Gestisce vocabolario dinamico e interfaccia con il kernel.
+    Main Python Interface to A.D.A.M CUDA Kernel
+    ============================================
+
+    This class provides the primary interface between Python and the CUDA kernel.
+    It manages the model lifecycle, vocabulary, training, and inference.
+
+    Responsibilities:
+    - Compile and load CUDA kernel (via CUDACompiler)
+    - Manage dynamic vocabulary (hot/cold architecture)
+    - Orchestrate training (forward + backward passes)
+    - Handle text generation (confidence-based stopping)
+    - Sync stats and vocabulary between GPU and CPU
+    - Save/load checkpoints
+
+    Vocabulary Architecture:
+    - Hot vocab (GPU): 10,000 most frequent words
+    - Cold vocab (RAM): Unlimited size
+    - Character fallback: 256 ASCII/UTF-8 chars
+
+    Training Flow:
+        1. Encode text to token IDs (vocab.encode_text)
+        2. Update vocabulary (hot/cold management)
+        3. Train on batch (self.train)
+        4. Sync stats (self.sync_stats)
+        5. Periodic checkpoint (CheckpointManager)
+
+    Generation Flow:
+        1. Encode prompt to token IDs
+        2. Generate next token (self.generate_next)
+        3. Check confidence (stop if low)
+        4. Append to sequence
+        5. Repeat until stopping condition
+
+    Example Usage:
+        # Initialize
+        brain = VectLLMBrain()
+        brain.start()
+
+        # Train
+        text = "The quick brown fox..."
+        token_ids = brain.vocab.encode_text(text)
+        loss = brain.train(token_ids, mode=MODE_EXTERNAL_INPUT)
+
+        # Generate
+        prompt = "Once upon a time"
+        generated = brain.generate_text(prompt, max_tokens=100)
+
+    See Also:
+        - core/vocabulary.py: DynamicVocabulary implementation
+        - kernels/brain.cu: CUDA kernel implementation
+        - core/config.py: Configuration system
     """
     
     def __init__(self, 
