@@ -1573,10 +1573,30 @@ extern "C" {
 
 static UnifiedVectorLLM* g_system = NULL;
 
+// Runtime model configuration (set by Python before init)
+static int runtime_num_layers = NUM_LAYERS;
+static int runtime_embed_dim = EMBED_DIM;
+static int runtime_num_heads = NUM_HEADS;
+static int runtime_max_seq_len = MAX_SEQ_LEN;
+
+extern "C" void set_model_config(int num_layers, int embed_dim, int num_heads, int max_seq_len) {
+    runtime_num_layers = num_layers;
+    runtime_embed_dim = embed_dim;
+    runtime_num_heads = num_heads;
+    runtime_max_seq_len = max_seq_len;
+    printf("✓ CUDA model config: %d layers, %d dim, %d heads, %d seq_len\n",
+           num_layers, embed_dim, num_heads, max_seq_len);
+}
+
 int init_system(void) {
     if (g_system) return -1;
     g_system = (UnifiedVectorLLM*)calloc(1, sizeof(UnifiedVectorLLM));
-    
+
+    // Use runtime config values
+    const int embed_dim = runtime_embed_dim;
+    const int max_seq_len = runtime_max_seq_len;
+    const int total_vocab = CHAR_VOCAB_SIZE + MAX_WORD_VOCAB_SIZE;
+
     cudaSetDevice(0);
     cudaStreamCreate(&g_system->gpu.main_stream);
     cudaStreamCreate(&g_system->gpu.venn_stream);
@@ -1591,32 +1611,32 @@ int init_system(void) {
     cudaEventCreate(&g_system->gpu.h2d_complete);
     cudaEventCreate(&g_system->gpu.compute_complete);
     cudaEventCreate(&g_system->gpu.d2h_complete);
-    
-    // Allocate model parameters - DUAL EMBEDDINGS
-    cudaMalloc(&g_system->llm.char_embeddings, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.word_embeddings, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+
+    // Allocate model parameters - DUAL EMBEDDINGS (using runtime dimensions)
+    cudaMalloc(&g_system->llm.char_embeddings, CHAR_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.word_embeddings, MAX_WORD_VOCAB_SIZE * embed_dim * sizeof(float));
     cudaMalloc(&g_system->llm.word_valid_mask, MAX_WORD_VOCAB_SIZE * sizeof(int));
-    cudaMalloc(&g_system->llm.pos_embeddings, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.qkv_weights, 3 * EMBED_DIM * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.ffn_w1, 4 * EMBED_DIM * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.ffn_w2, 4 * EMBED_DIM * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.output_weights, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    
-    // Allocate gradients - DUAL
-    cudaMalloc(&g_system->llm.grad_char_embeddings, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.grad_word_embeddings, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.grad_hidden_states, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.grad_output_weights, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    
-    // Allocate momentum buffers - DUAL
-    cudaMalloc(&g_system->llm.momentum_char_emb, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.momentum_word_emb, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.momentum_output, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    
-    // Allocate forward buffers
-    cudaMalloc(&g_system->llm.hidden_states, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.attention_output, MAX_SEQ_LEN * EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.logits, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));
+    cudaMalloc(&g_system->llm.pos_embeddings, max_seq_len * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.qkv_weights, 3 * embed_dim * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.ffn_w1, 4 * embed_dim * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.ffn_w2, 4 * embed_dim * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.output_weights, total_vocab * embed_dim * sizeof(float));
+
+    // Allocate gradients - DUAL (using runtime dimensions)
+    cudaMalloc(&g_system->llm.grad_char_embeddings, CHAR_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_word_embeddings, MAX_WORD_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_hidden_states, max_seq_len * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.grad_output_weights, total_vocab * embed_dim * sizeof(float));
+
+    // Allocate momentum buffers - DUAL (using runtime dimensions)
+    cudaMalloc(&g_system->llm.momentum_char_emb, CHAR_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.momentum_word_emb, MAX_WORD_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.momentum_output, total_vocab * embed_dim * sizeof(float));
+
+    // Allocate forward buffers (using runtime dimensions)
+    cudaMalloc(&g_system->llm.hidden_states, max_seq_len * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.attention_output, max_seq_len * embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.logits, max_seq_len * total_vocab * sizeof(float));
 
     // Allocate optimized computation buffers (for cuBLAS backward)
     cudaMalloc(&g_system->llm.softmax_cache, MAX_SEQ_LEN * TOTAL_VOCAB_SIZE * sizeof(float));

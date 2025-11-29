@@ -279,10 +279,14 @@ class VectLLMBrain:
 
     def _setup_api(self):
         """Setup function signatures per ctypes"""
+        # set_model_config - MUST be called before init_system
+        self.lib.set_model_config.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.lib.set_model_config.restype = None
+
         # init_system
         self.lib.init_system.argtypes = []
         self.lib.init_system.restype = ctypes.c_int
-        
+
         # shutdown_system
         self.lib.shutdown_system.argtypes = []
         self.lib.shutdown_system.restype = None
@@ -432,8 +436,18 @@ class VectLLMBrain:
         """Inizializza il sistema CUDA"""
         if self.initialized:
             return
-        
+
         print("🚀 Initializing VectLLM Brain...")
+
+        # Set model configuration BEFORE initializing system
+        # This allows CUDA to use TUI-configured architecture parameters
+        self.lib.set_model_config(
+            MODEL_CONFIG.NUM_LAYERS,
+            MODEL_CONFIG.EMBED_DIM,
+            MODEL_CONFIG.NUM_HEADS,
+            MODEL_CONFIG.MAX_SEQ_LEN
+        )
+
         result = self.lib.init_system()
         if result != 0:
             raise RuntimeError("Failed to initialize CUDA system")
