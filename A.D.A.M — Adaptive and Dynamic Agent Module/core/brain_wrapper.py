@@ -62,9 +62,10 @@ class CUDACompiler:
         with open(kernel_path, 'rb') as f:
             code = f.read()
 
-        # Include architecture parameters in hash so recompile on change
+        # Include architecture + Venn parameters in hash so recompile on change
         arch_params = f"{MODEL_CONFIG.NUM_LAYERS}_{MODEL_CONFIG.EMBED_DIM}_{MODEL_CONFIG.NUM_HEADS}_{MODEL_CONFIG.MAX_SEQ_LEN}"
-        combined = code + arch_params.encode()
+        venn_params = f"{MODEL_CONFIG.VENN_CLUSTERS}_{MODEL_CONFIG.NUM_VENN_HEADS}_{MODEL_CONFIG.EPISODIC_BUFFER_SIZE}"
+        combined = code + arch_params.encode() + venn_params.encode()
 
         code_hash = hashlib.sha256(combined).hexdigest()[:16]
         return self.cache_dir / f"libvectllm_{code_hash}.so"
@@ -120,10 +121,15 @@ class CUDACompiler:
 
         # Inject MODEL_CONFIG parameters as #define
         replacements = {
+            # Architecture
             '#define MAX_SEQ_LEN 512': f'#define MAX_SEQ_LEN {MODEL_CONFIG.MAX_SEQ_LEN}',
             '#define EMBED_DIM 768': f'#define EMBED_DIM {MODEL_CONFIG.EMBED_DIM}',
             '#define NUM_HEADS 12': f'#define NUM_HEADS {MODEL_CONFIG.NUM_HEADS}',
             '#define NUM_LAYERS 6': f'#define NUM_LAYERS {MODEL_CONFIG.NUM_LAYERS}',
+            # Venn System
+            '#define VENN_CLUSTERS 256': f'#define VENN_CLUSTERS {MODEL_CONFIG.VENN_CLUSTERS}',
+            '#define NUM_VENN_HEADS 12': f'#define NUM_VENN_HEADS {MODEL_CONFIG.NUM_VENN_HEADS}',
+            '#define EPISODIC_BUFFER_SIZE 1024': f'#define EPISODIC_BUFFER_SIZE {MODEL_CONFIG.EPISODIC_BUFFER_SIZE}',
         }
 
         for old, new in replacements.items():
