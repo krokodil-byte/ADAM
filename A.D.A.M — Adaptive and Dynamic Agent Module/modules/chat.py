@@ -77,13 +77,13 @@ class InteractiveChat:
                 # Update stats
                 brain_stats = self.brain.get_stats()
                 self.stats.update(
-                    cycles=brain_stats['cycles'],
-                    tokens=brain_stats['tokens'],
-                    loss=brain_stats['loss'],
+                    cycles=brain_stats.get('cycles', 0),
+                    tokens=brain_stats.get('tokens', 0),
+                    loss=brain_stats.get('loss'),
                     reward=brain_stats.get('reward'),
                     topk_reward=brain_stats.get('topk_reward'),
                     venn_reward=brain_stats.get('venn_reward'),
-                    vocab_size=brain_stats['vocab_words']
+                    vocab_size=brain_stats.get('vocab_words', 0)
                 )
 
             except queue.Empty:
