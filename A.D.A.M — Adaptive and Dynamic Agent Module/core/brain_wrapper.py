@@ -216,9 +216,11 @@ class CUDACompiler:
         print(f"   Arch: {arch}")
 
         # Build command with temp file
+        include_dir = kernel_path.parent
         cmd = [
             nvcc,
             tmp_path,
+            '-I', str(include_dir),
             '-o', str(lib_path)
         ] + RUNTIME_CONFIG.NVCC_FLAGS + [f'-arch={arch}']
         
@@ -435,7 +437,14 @@ class VectLLMBrain:
     def _setup_api(self):
         """Setup function signatures per ctypes"""
         # set_model_config - MUST be called before init_system
-        self.lib.set_model_config.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.lib.set_model_config.argtypes = [
+            ctypes.c_int,  # num_layers
+            ctypes.c_int,  # embed_dim
+            ctypes.c_int,  # num_heads
+            ctypes.c_int,  # max_seq_len
+            ctypes.c_int,  # num_venn_heads
+            ctypes.c_int   # venn_clusters
+        ]
         self.lib.set_model_config.restype = None
 
         # init_system
@@ -610,7 +619,9 @@ class VectLLMBrain:
             MODEL_CONFIG.NUM_LAYERS,
             MODEL_CONFIG.EMBED_DIM,
             MODEL_CONFIG.NUM_HEADS,
-            MODEL_CONFIG.MAX_SEQ_LEN
+            MODEL_CONFIG.MAX_SEQ_LEN,
+            MODEL_CONFIG.NUM_VENN_HEADS,
+            MODEL_CONFIG.VENN_CLUSTERS
         )
 
         result = self.lib.init_system()
