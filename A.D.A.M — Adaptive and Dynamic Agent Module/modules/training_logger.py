@@ -181,12 +181,41 @@ class TrainingLogger:
 
     def article_progress(self, idx: int, title: str, tokens: int, reward: float, vocab: int, loss: float = None,
                          topk_reward: float = None, venn_reward: float = None):
+    def file_end(self, tokens: int, time_seconds: float, reward: float, vocab_size: int, loss: float = None):
+        """Log end of file processing."""
+        speed = tokens / time_seconds if time_seconds > 0 else 0
+        msg = f"  -> {tokens:,} tokens, {speed:.0f} tok/s, reward={reward:.4f}"
+        if loss is not None:
+            msg += f" (pseudo-loss={loss:.4f})"
+        msg += f", vocab={vocab_size:,}"
+        self.info(msg)
+
+    def sample_progress(self, idx: int, total: int, tokens: int, reward: float, loss: float = None):
+        """Log sample progress (for HF datasets)."""
+        msg = f"  Sample {idx}/{total}: {tokens:,} tokens, reward={reward:.4f}"
+        if loss is not None:
+            msg += f" (pseudo-loss={loss:.4f})"
+        self.info(msg)
+
+    def batch_progress(self, batch_num: int, tokens: int, reward: float, speed: float, loss: float = None):
+        """Log batch progress."""
+        msg = f"  Batch {batch_num}: {tokens:,} tokens, reward={reward:.4f}"
+        if loss is not None:
+            msg += f" (pseudo-loss={loss:.4f})"
+        msg += f", {speed:.0f} tok/s"
+        self.info(msg)
+
+    def article_progress(self, idx: int, title: str, tokens: int, reward: float, vocab: int, loss: float = None):
         """Log Wikipedia article progress."""
         # Truncate title if too long
         if len(title) > 30:
             title = title[:27] + "..."
         reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
         msg = f"  [{idx}] {title}: {tokens:,} tok, {reward_msg}, vocab={vocab:,}"
+        msg = f"  [{idx}] {title}: {tokens:,} tok, reward={reward:.4f}"
+        if loss is not None:
+            msg += f" (pseudo-loss={loss:.4f})"
+        msg += f", vocab={vocab:,}"
         self.info(msg)
 
     def checkpoint_save(self, name: str):
@@ -203,6 +232,12 @@ class TrainingLogger:
         """Log periodic stats update."""
         reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
         msg = f"  Stats: {reward_msg}, vocab={vocab_size:,}, tokens={tokens_total:,}"
+    def stats_update(self, reward: float, vocab_size: int, tokens_total: int, speed: float = 0, loss: float = None):
+        """Log periodic stats update."""
+        msg = f"  Stats: reward={reward:.4f}"
+        if loss is not None:
+            msg += f" (pseudo-loss={loss:.4f})"
+        msg += f", vocab={vocab_size:,}, tokens={tokens_total:,}"
         if speed > 0:
             msg += f", {speed:.0f} tok/s"
         self.info(msg)

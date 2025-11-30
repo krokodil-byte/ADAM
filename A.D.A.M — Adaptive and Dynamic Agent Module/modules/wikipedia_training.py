@@ -441,6 +441,7 @@ class WikipediaTrainer:
                     loss=brain_stats['loss'],
                     topk_reward=brain_stats.get('topk_reward'),
                     venn_reward=brain_stats.get('venn_reward')
+                    loss=brain_stats['loss']
                 )
 
             # Auto-save

@@ -687,6 +687,7 @@ class HFDatasetTrainer:
                     loss=brain_stats['loss'],
                     topk_reward=brain_stats.get('topk_reward'),
                     venn_reward=brain_stats.get('venn_reward')
+                    tokens, brain_stats['reward'], loss=brain_stats['loss']
                 )
 
             # Validation check (only if validate_per_pass is False)

@@ -30,6 +30,8 @@ class TrainingMetrics:
     reward_history: deque = field(default_factory=lambda: deque(maxlen=1000))
     topk_history: deque = field(default_factory=lambda: deque(maxlen=1000))
     venn_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    loss_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    reward_history: deque = field(default_factory=lambda: deque(maxlen=1000))
 
     # Validation metrics
     validation_loss: float = 0.0
@@ -148,6 +150,13 @@ class StatsCollector:
             self.metrics.current_venn_reward = venn_reward
             if self._update_count % self.history_sample_rate == 0:
                 self.metrics.venn_history.append((now, venn_reward))
+
+        if reward is not None:
+            self.metrics.current_reward = reward
+            self.metrics.best_reward = max(self.metrics.best_reward, reward)
+            self.reward_window.append(reward)
+            if self._update_count % self.history_sample_rate == 0:
+                self.metrics.reward_history.append((now, reward))
 
         if vocab_size is not None:
             self.metrics.vocab_size = vocab_size
