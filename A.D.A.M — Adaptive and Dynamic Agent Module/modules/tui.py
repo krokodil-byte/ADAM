@@ -151,6 +151,7 @@ class ADAMTUI:
                     ('architecture', '🏗️  Architecture', 'Model layers, dimensions, sequence length'),
                     ('venn', '🔷 Venn System', 'Venn clusters, propagation, membership'),
                     ('vocabulary', '🔤 Vocabulary', 'Word creation, pruning, vocab size'),
+                    ('policy', '🏛️ Policy', 'Reward blending and schedules'),
                     ('training', '📈 Training', 'Learning rates, batch size, validation'),
                     ('generation', '✍️  Generation', 'Continuation bias, temperature, stopping'),
                     ('performance', '⚡ Performance', 'GPU/CUDA optimizations'),
@@ -191,6 +192,13 @@ class ADAMTUI:
                 'word_pruning_threshold': MODEL_CONFIG.WORD_PRUNING_THRESHOLD,
                 'max_word_length': MODEL_CONFIG.MAX_WORD_LENGTH,
                 'max_word_vocab_size': MODEL_CONFIG.MAX_WORD_VOCAB_SIZE,
+            },
+            'policy': {
+                'reward_alpha': TRAINING_CONFIG.REWARD_ALPHA,
+                'alpha_schedule_enabled': TRAINING_CONFIG.REWARD_ALPHA_SCHEDULE_ENABLED,
+                'alpha_start': TRAINING_CONFIG.REWARD_ALPHA_START,
+                'alpha_end': TRAINING_CONFIG.REWARD_ALPHA_END,
+                'alpha_schedule_steps': TRAINING_CONFIG.REWARD_ALPHA_SCHEDULE_STEPS,
             },
             'training': {
                 'base_lr': TRAINING_CONFIG.BASE_LR,
@@ -514,6 +522,9 @@ class ADAMTUI:
             return
         elif key == 'training':
             self._edit_settings(stdscr, 'training')
+            return
+        elif key == 'policy':
+            self._edit_settings(stdscr, 'policy')
             return
         elif key == 'generation':
             self._edit_settings(stdscr, 'generation')

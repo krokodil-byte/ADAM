@@ -389,6 +389,9 @@ class VectLLMBrain:
         if PERFORMANCE_CONFIG.USE_PINNED_MEMORY:
             self._allocate_pinned_buffers()
 
+        # Track current reward blending factor for scheduling/policy updates
+        self._current_alpha = TRAINING_CONFIG.REWARD_ALPHA
+
     def _allocate_pinned_buffers(self, min_words: Optional[int] = None):
         """
         Allocate pinned memory buffers for faster CPU<->GPU transfers.
@@ -471,6 +474,28 @@ class VectLLMBrain:
             ctypes.c_float   # venn_threshold
         ]
         self.lib.set_reward_config.restype = None
+
+    def _maybe_update_reward_alpha(self, cycles: int = 0):
+        """Apply reward alpha scheduling if enabled and the target changed."""
+        if not getattr(TRAINING_CONFIG, "REWARD_ALPHA_SCHEDULE_ENABLED", False):
+            return
+
+        steps = max(1, getattr(TRAINING_CONFIG, "REWARD_ALPHA_SCHEDULE_STEPS", 1))
+        start_alpha = getattr(TRAINING_CONFIG, "REWARD_ALPHA_START", TRAINING_CONFIG.REWARD_ALPHA)
+        end_alpha = getattr(TRAINING_CONFIG, "REWARD_ALPHA_END", TRAINING_CONFIG.REWARD_ALPHA)
+        progress = min(1.0, max(0.0, cycles / steps))
+        target_alpha = start_alpha + (end_alpha - start_alpha) * progress
+
+        if abs(target_alpha - self._current_alpha) < 1e-4:
+            return
+
+        self._current_alpha = target_alpha
+        self.lib.set_reward_config(
+            ctypes.c_float(target_alpha),
+            ctypes.c_int(TRAINING_CONFIG.REWARD_TOP_K),
+            ctypes.c_float(TRAINING_CONFIG.REWARD_PENALTY_SCALE),
+            ctypes.c_float(TRAINING_CONFIG.REWARD_VENN_SIMILARITY_THRESHOLD)
+        )
 
         # process_input
         self.lib.process_input.argtypes = [ctypes.c_char_p]
@@ -631,9 +656,14 @@ class VectLLMBrain:
         # Set Venn configuration from config.py
         self._configure_venn_system()
 
-        # Set reward system configuration from config.py
+        # Set reward system configuration from config.py (respecting schedule start)
+        initial_alpha = TRAINING_CONFIG.REWARD_ALPHA
+        if getattr(TRAINING_CONFIG, "REWARD_ALPHA_SCHEDULE_ENABLED", False):
+            initial_alpha = getattr(TRAINING_CONFIG, "REWARD_ALPHA_START", initial_alpha)
+
+        self._current_alpha = initial_alpha
         self.lib.set_reward_config(
-            TRAINING_CONFIG.REWARD_ALPHA,
+            initial_alpha,
             TRAINING_CONFIG.REWARD_TOP_K,
             TRAINING_CONFIG.REWARD_PENALTY_SCALE,
             TRAINING_CONFIG.REWARD_VENN_SIMILARITY_THRESHOLD
@@ -1426,6 +1456,9 @@ class VectLLMBrain:
             ctypes.byref(topk_reward),
             ctypes.byref(venn_reward)
         )
+
+        # Update reward alpha if a schedule is active
+        self._maybe_update_reward_alpha(cycles.value)
 
         # Derive a loss-like value from reward for backward compatibility with
         # existing training/logging codepaths that still expect a "loss" key.

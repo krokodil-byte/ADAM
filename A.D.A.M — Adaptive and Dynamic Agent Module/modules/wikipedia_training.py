@@ -430,12 +430,17 @@ class WikipediaTrainer:
                 tokens=brain_stats['tokens'],
                 loss=brain_stats['loss'],
                 reward=brain_stats['reward'],
+                topk_reward=brain_stats.get('topk_reward'),
+                venn_reward=brain_stats.get('venn_reward'),
                 vocab_size=brain_stats['vocab_words']
             )
 
             if verbose and article_num % 10 == 0:
                 self.logger.article_progress(
                     article_num, title, processed, brain_stats['reward'], brain_stats['vocab_words'],
+                    loss=brain_stats['loss'],
+                    topk_reward=brain_stats.get('topk_reward'),
+                    venn_reward=brain_stats.get('venn_reward')
                     loss=brain_stats['loss']
                 )
 

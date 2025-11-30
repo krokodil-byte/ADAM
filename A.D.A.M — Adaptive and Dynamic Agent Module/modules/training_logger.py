@@ -67,6 +67,19 @@ class TrainingLogger:
         self.current_task = None
         self._console = console
 
+    def _format_reward(self, reward: float, topk: float = None, venn: float = None, loss: float = None) -> str:
+        """Return a compact string for reward components and pseudo-loss."""
+        parts = []
+        if reward is not None:
+            parts.append(f"reward={reward:.4f}")
+        if topk is not None:
+            parts.append(f"r1(topk)={topk:.4f}")
+        if venn is not None:
+            parts.append(f"r2(venn)={venn:.4f}")
+        if loss is not None:
+            parts.append(f"pseudo-loss={loss:.4f}")
+        return ", ".join(parts)
+
     # === Core logging methods ===
 
     def debug(self, msg: str):
@@ -144,6 +157,30 @@ class TrainingLogger:
         """Log start of file processing."""
         self.info(f"File {file_idx}/{total_files}: {filename} ({size_chars:,} chars)")
 
+    def file_end(self, tokens: int, time_seconds: float, reward: float, vocab_size: int,
+                 loss: float = None, topk_reward: float = None, venn_reward: float = None):
+        """Log end of file processing."""
+        speed = tokens / time_seconds if time_seconds > 0 else 0
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  -> {tokens:,} tokens, {speed:.0f} tok/s, {reward_msg}, vocab={vocab_size:,}"
+        self.info(msg)
+
+    def sample_progress(self, idx: int, total: int, tokens: int, reward: float, loss: float = None,
+                        topk_reward: float = None, venn_reward: float = None):
+        """Log sample progress (for HF datasets)."""
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  Sample {idx}/{total}: {tokens:,} tokens, {reward_msg}"
+        self.info(msg)
+
+    def batch_progress(self, batch_num: int, tokens: int, reward: float, speed: float, loss: float = None,
+                       topk_reward: float = None, venn_reward: float = None):
+        """Log batch progress."""
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  Batch {batch_num}: {tokens:,} tokens, {reward_msg}, {speed:.0f} tok/s"
+        self.info(msg)
+
+    def article_progress(self, idx: int, title: str, tokens: int, reward: float, vocab: int, loss: float = None,
+                         topk_reward: float = None, venn_reward: float = None):
     def file_end(self, tokens: int, time_seconds: float, reward: float, vocab_size: int, loss: float = None):
         """Log end of file processing."""
         speed = tokens / time_seconds if time_seconds > 0 else 0
@@ -173,6 +210,8 @@ class TrainingLogger:
         # Truncate title if too long
         if len(title) > 30:
             title = title[:27] + "..."
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  [{idx}] {title}: {tokens:,} tok, {reward_msg}, vocab={vocab:,}"
         msg = f"  [{idx}] {title}: {tokens:,} tok, reward={reward:.4f}"
         if loss is not None:
             msg += f" (pseudo-loss={loss:.4f})"
@@ -188,6 +227,11 @@ class TrainingLogger:
         if num_words > 0:
             self.debug(f"  Synced {num_words} new words to GPU")
 
+    def stats_update(self, reward: float, vocab_size: int, tokens_total: int, speed: float = 0, loss: float = None,
+                    topk_reward: float = None, venn_reward: float = None):
+        """Log periodic stats update."""
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  Stats: {reward_msg}, vocab={vocab_size:,}, tokens={tokens_total:,}"
     def stats_update(self, reward: float, vocab_size: int, tokens_total: int, speed: float = 0, loss: float = None):
         """Log periodic stats update."""
         msg = f"  Stats: reward={reward:.4f}"

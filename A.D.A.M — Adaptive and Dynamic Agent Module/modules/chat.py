@@ -77,10 +77,13 @@ class InteractiveChat:
                 # Update stats
                 brain_stats = self.brain.get_stats()
                 self.stats.update(
-                    cycles=brain_stats['cycles'],
-                    tokens=brain_stats['tokens'],
-                    loss=brain_stats['loss'],
-                    vocab_size=brain_stats['vocab_words']
+                    cycles=brain_stats.get('cycles', 0),
+                    tokens=brain_stats.get('tokens', 0),
+                    loss=brain_stats.get('loss'),
+                    reward=brain_stats.get('reward'),
+                    topk_reward=brain_stats.get('topk_reward'),
+                    venn_reward=brain_stats.get('venn_reward'),
+                    vocab_size=brain_stats.get('vocab_words', 0)
                 )
 
             except queue.Empty:
@@ -210,15 +213,19 @@ class InteractiveChat:
         print(f"Bot> {response}")
         print()
 
-        # Update stats (may not reflect latest training if async)
-        if not self.async_training:
-            brain_stats = self.brain.get_stats()
-            self.stats.update(
-                cycles=brain_stats['cycles'],
-                tokens=brain_stats['tokens'],
-                loss=brain_stats['loss'],
-                vocab_size=brain_stats['vocab_words']
-            )
+        # Update stats snapshot so /stats stays aligned with the latest kernel
+        # metrics even when training runs asynchronously.
+        brain_stats = self.brain.get_stats()
+        self.stats.update(
+            cycles=brain_stats['cycles'],
+            tokens=brain_stats['tokens'],
+            loss=brain_stats.get('loss'),
+            reward=brain_stats.get('reward'),
+            topk_reward=brain_stats.get('topk_reward'),
+            venn_reward=brain_stats.get('venn_reward'),
+            vocab_size=brain_stats['vocab_words'],
+            vocab_utilization=brain_stats.get('vocab_utilization'),
+        )
     
     def _generate_response(self, user_message: str) -> str:
         """
@@ -239,7 +246,16 @@ class InteractiveChat:
         # If generation failed or empty, provide fallback
         if not response or len(response.strip()) == 0:
             stats = self.brain.get_stats()
-            return f"[Training... Loss: {stats['loss']:.3f}, Vocab: {stats['vocab_words']} words]"
+            return (
+                "[Training... r₁={:.3f} r₂={:.3f} r*={:.3f} | "
+                "pseudo-loss={:.3f}, Vocab: {} words]".format(
+                    stats.get('topk_reward', 0.0),
+                    stats.get('venn_reward', 0.0),
+                    stats.get('reward', 0.0),
+                    stats.get('loss', 0.0),
+                    stats['vocab_words'],
+                )
+            )
 
         return response.strip()
     

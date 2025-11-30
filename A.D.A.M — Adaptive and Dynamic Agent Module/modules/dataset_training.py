@@ -683,6 +683,10 @@ class HFDatasetTrainer:
                 brain_stats = self.brain.get_stats()
                 self.logger.sample_progress(
                     idx, train_samples_count,
+                    tokens, brain_stats['reward'],
+                    loss=brain_stats['loss'],
+                    topk_reward=brain_stats.get('topk_reward'),
+                    venn_reward=brain_stats.get('venn_reward')
                     tokens, brain_stats['reward'], loss=brain_stats['loss']
                 )
 
@@ -720,6 +724,8 @@ class HFDatasetTrainer:
             tokens=brain_stats['tokens'],
             loss=brain_stats['loss'],
             reward=brain_stats['reward'],
+            topk_reward=brain_stats.get('topk_reward'),
+            venn_reward=brain_stats.get('venn_reward'),
             vocab_size=brain_stats['vocab_words']
         )
 
