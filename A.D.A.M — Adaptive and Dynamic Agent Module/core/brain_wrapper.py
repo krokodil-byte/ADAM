@@ -216,9 +216,11 @@ class CUDACompiler:
         print(f"   Arch: {arch}")
 
         # Build command with temp file
+        include_dir = kernel_path.parent
         cmd = [
             nvcc,
             tmp_path,
+            '-I', str(include_dir),
             '-o', str(lib_path)
         ] + RUNTIME_CONFIG.NVCC_FLAGS + [f'-arch={arch}']
         
