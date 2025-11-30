@@ -1427,15 +1427,23 @@ class VectLLMBrain:
             ctypes.byref(venn_reward)
         )
 
+        # Derive a loss-like value from reward for backward compatibility with
+        # existing training/logging codepaths that still expect a "loss" key.
+        # Higher reward => lower pseudo-loss.
+        reward_val = reward.value
+        pseudo_loss = -reward_val if reward_val != 0 else 0.0
+
         return {
             'cycles': cycles.value,
             'tokens': tokens.value,
             'temperature': temp.value,
             'momentum': momentum.value,
             # Reward-based metrics (higher = better)
-            'reward': reward.value,
+            'reward': reward_val,
             'topk_reward': topk_reward.value,
             'venn_reward': venn_reward.value,
+            # Legacy compatibility (loss expected by callers)
+            'loss': pseudo_loss,
             # Vocab stats
             'vocab_words': len(self.vocab.word_to_id),
             'vocab_utilization': len(self.vocab.word_to_id) / self.vocab.max_word_vocab_size,
