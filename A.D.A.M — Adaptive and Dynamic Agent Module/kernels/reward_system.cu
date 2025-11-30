@@ -33,10 +33,10 @@
 #define REWARD_SYSTEM_CU
 
 // Runtime reward parameters (set from TrainingConfig)
-static float reward_alpha = 0.7f;                    // Weight for Top-K reward
-static int reward_top_k = 5;                         // Consider top-K predictions
-static float reward_penalty_scale = 0.5f;            // Penalty scale for wrong predictions
-static float reward_venn_similarity_threshold = 0.3f; // Min similarity for Venn reward
+__device__ __managed__ float reward_alpha = 0.7f;                    // Weight for Top-K reward
+__device__ __managed__ int reward_top_k = 5;                         // Consider top-K predictions
+__device__ __managed__ float reward_penalty_scale = 0.5f;            // Penalty scale for wrong predictions
+__device__ __managed__ float reward_venn_similarity_threshold = 0.3f; // Min similarity for Venn reward
 
 /*
  * Set reward system parameters from Python config
