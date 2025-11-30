@@ -216,9 +216,11 @@ class CUDACompiler:
         print(f"   Arch: {arch}")
 
         # Build command with temp file
+        include_dir = kernel_path.parent
         cmd = [
             nvcc,
             tmp_path,
+            '-I', str(include_dir),
             '-o', str(lib_path)
         ] + RUNTIME_CONFIG.NVCC_FLAGS + [f'-arch={arch}']
         
@@ -387,6 +389,9 @@ class VectLLMBrain:
         if PERFORMANCE_CONFIG.USE_PINNED_MEMORY:
             self._allocate_pinned_buffers()
 
+        # Track current reward blending factor for scheduling/policy updates
+        self._current_alpha = TRAINING_CONFIG.REWARD_ALPHA
+
     def _allocate_pinned_buffers(self, min_words: Optional[int] = None):
         """
         Allocate pinned memory buffers for faster CPU<->GPU transfers.
@@ -435,7 +440,14 @@ class VectLLMBrain:
     def _setup_api(self):
         """Setup function signatures per ctypes"""
         # set_model_config - MUST be called before init_system
-        self.lib.set_model_config.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.lib.set_model_config.argtypes = [
+            ctypes.c_int,  # num_layers
+            ctypes.c_int,  # embed_dim
+            ctypes.c_int,  # num_heads
+            ctypes.c_int,  # max_seq_len
+            ctypes.c_int,  # num_venn_heads
+            ctypes.c_int   # venn_clusters
+        ]
         self.lib.set_model_config.restype = None
 
         # init_system
@@ -462,6 +474,28 @@ class VectLLMBrain:
             ctypes.c_float   # venn_threshold
         ]
         self.lib.set_reward_config.restype = None
+
+    def _maybe_update_reward_alpha(self, cycles: int = 0):
+        """Apply reward alpha scheduling if enabled and the target changed."""
+        if not getattr(TRAINING_CONFIG, "REWARD_ALPHA_SCHEDULE_ENABLED", False):
+            return
+
+        steps = max(1, getattr(TRAINING_CONFIG, "REWARD_ALPHA_SCHEDULE_STEPS", 1))
+        start_alpha = getattr(TRAINING_CONFIG, "REWARD_ALPHA_START", TRAINING_CONFIG.REWARD_ALPHA)
+        end_alpha = getattr(TRAINING_CONFIG, "REWARD_ALPHA_END", TRAINING_CONFIG.REWARD_ALPHA)
+        progress = min(1.0, max(0.0, cycles / steps))
+        target_alpha = start_alpha + (end_alpha - start_alpha) * progress
+
+        if abs(target_alpha - self._current_alpha) < 1e-4:
+            return
+
+        self._current_alpha = target_alpha
+        self.lib.set_reward_config(
+            ctypes.c_float(target_alpha),
+            ctypes.c_int(TRAINING_CONFIG.REWARD_TOP_K),
+            ctypes.c_float(TRAINING_CONFIG.REWARD_PENALTY_SCALE),
+            ctypes.c_float(TRAINING_CONFIG.REWARD_VENN_SIMILARITY_THRESHOLD)
+        )
 
         # process_input
         self.lib.process_input.argtypes = [ctypes.c_char_p]
@@ -610,7 +644,9 @@ class VectLLMBrain:
             MODEL_CONFIG.NUM_LAYERS,
             MODEL_CONFIG.EMBED_DIM,
             MODEL_CONFIG.NUM_HEADS,
-            MODEL_CONFIG.MAX_SEQ_LEN
+            MODEL_CONFIG.MAX_SEQ_LEN,
+            MODEL_CONFIG.NUM_VENN_HEADS,
+            MODEL_CONFIG.VENN_CLUSTERS
         )
 
         result = self.lib.init_system()
@@ -620,9 +656,14 @@ class VectLLMBrain:
         # Set Venn configuration from config.py
         self._configure_venn_system()
 
-        # Set reward system configuration from config.py
+        # Set reward system configuration from config.py (respecting schedule start)
+        initial_alpha = TRAINING_CONFIG.REWARD_ALPHA
+        if getattr(TRAINING_CONFIG, "REWARD_ALPHA_SCHEDULE_ENABLED", False):
+            initial_alpha = getattr(TRAINING_CONFIG, "REWARD_ALPHA_START", initial_alpha)
+
+        self._current_alpha = initial_alpha
         self.lib.set_reward_config(
-            TRAINING_CONFIG.REWARD_ALPHA,
+            initial_alpha,
             TRAINING_CONFIG.REWARD_TOP_K,
             TRAINING_CONFIG.REWARD_PENALTY_SCALE,
             TRAINING_CONFIG.REWARD_VENN_SIMILARITY_THRESHOLD
@@ -1416,15 +1457,26 @@ class VectLLMBrain:
             ctypes.byref(venn_reward)
         )
 
+        # Update reward alpha if a schedule is active
+        self._maybe_update_reward_alpha(cycles.value)
+
+        # Derive a loss-like value from reward for backward compatibility with
+        # existing training/logging codepaths that still expect a "loss" key.
+        # Higher reward => lower pseudo-loss.
+        reward_val = reward.value
+        pseudo_loss = -reward_val if reward_val != 0 else 0.0
+
         return {
             'cycles': cycles.value,
             'tokens': tokens.value,
             'temperature': temp.value,
             'momentum': momentum.value,
             # Reward-based metrics (higher = better)
-            'reward': reward.value,
+            'reward': reward_val,
             'topk_reward': topk_reward.value,
             'venn_reward': venn_reward.value,
+            # Legacy compatibility (loss expected by callers)
+            'loss': pseudo_loss,
             # Vocab stats
             'vocab_words': len(self.vocab.word_to_id),
             'vocab_utilization': len(self.vocab.word_to_id) / self.vocab.max_word_vocab_size,

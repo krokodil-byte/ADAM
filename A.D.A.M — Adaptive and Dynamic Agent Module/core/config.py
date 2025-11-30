@@ -274,6 +274,10 @@ class TrainingConfig:
 
     USE_REWARD_SYSTEM: bool = True              # Enable reward-based learning (always True)
     REWARD_ALPHA: float = 0.7                   # Weight for Top-K reward (0.0-1.0)
+    REWARD_ALPHA_SCHEDULE_ENABLED: bool = False # Enable alpha scheduling over time
+    REWARD_ALPHA_START: float = 0.7             # Starting alpha when schedule is enabled
+    REWARD_ALPHA_END: float = 0.5               # Target alpha after schedule completes
+    REWARD_ALPHA_SCHEDULE_STEPS: int = 10000    # Steps/cycles to reach REWARD_ALPHA_END
     REWARD_TOP_K: int = 5                       # Consider top-K predictions (1-10)
     REWARD_PENALTY_SCALE: float = 0.5           # Penalty scale for wrong predictions
     REWARD_VENN_SIMILARITY_THRESHOLD: float = 0.3  # Min similarity for Venn reward
@@ -756,6 +760,11 @@ def load_tui_settings():
         # Apply TRAINING settings
         if 'training' in settings:
             for key, value in settings['training'].items():
+                apply_setting(key, value)
+
+        # Apply POLICY/REWARD settings
+        if 'policy' in settings:
+            for key, value in settings['policy'].items():
                 apply_setting(key, value)
 
         # Apply GENERATION settings

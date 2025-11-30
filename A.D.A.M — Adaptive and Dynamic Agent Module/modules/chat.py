@@ -80,6 +80,9 @@ class InteractiveChat:
                     cycles=brain_stats['cycles'],
                     tokens=brain_stats['tokens'],
                     loss=brain_stats['loss'],
+                    reward=brain_stats.get('reward'),
+                    topk_reward=brain_stats.get('topk_reward'),
+                    venn_reward=brain_stats.get('venn_reward'),
                     vocab_size=brain_stats['vocab_words']
                 )
 

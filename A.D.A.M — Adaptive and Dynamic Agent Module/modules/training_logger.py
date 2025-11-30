@@ -67,6 +67,19 @@ class TrainingLogger:
         self.current_task = None
         self._console = console
 
+    def _format_reward(self, reward: float, topk: float = None, venn: float = None, loss: float = None) -> str:
+        """Return a compact string for reward components and pseudo-loss."""
+        parts = []
+        if reward is not None:
+            parts.append(f"reward={reward:.4f}")
+        if topk is not None:
+            parts.append(f"r1(topk)={topk:.4f}")
+        if venn is not None:
+            parts.append(f"r2(venn)={venn:.4f}")
+        if loss is not None:
+            parts.append(f"pseudo-loss={loss:.4f}")
+        return ", ".join(parts)
+
     # === Core logging methods ===
 
     def debug(self, msg: str):
@@ -144,25 +157,37 @@ class TrainingLogger:
         """Log start of file processing."""
         self.info(f"File {file_idx}/{total_files}: {filename} ({size_chars:,} chars)")
 
-    def file_end(self, tokens: int, time_seconds: float, loss: float, vocab_size: int):
+    def file_end(self, tokens: int, time_seconds: float, reward: float, vocab_size: int,
+                 loss: float = None, topk_reward: float = None, venn_reward: float = None):
         """Log end of file processing."""
         speed = tokens / time_seconds if time_seconds > 0 else 0
-        self.info(f"  -> {tokens:,} tokens, {speed:.0f} tok/s, loss={loss:.4f}, vocab={vocab_size:,}")
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  -> {tokens:,} tokens, {speed:.0f} tok/s, {reward_msg}, vocab={vocab_size:,}"
+        self.info(msg)
 
-    def sample_progress(self, idx: int, total: int, tokens: int, loss: float):
+    def sample_progress(self, idx: int, total: int, tokens: int, reward: float, loss: float = None,
+                        topk_reward: float = None, venn_reward: float = None):
         """Log sample progress (for HF datasets)."""
-        self.info(f"  Sample {idx}/{total}: {tokens:,} tokens, loss={loss:.4f}")
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  Sample {idx}/{total}: {tokens:,} tokens, {reward_msg}"
+        self.info(msg)
 
-    def batch_progress(self, batch_num: int, tokens: int, loss: float, speed: float):
+    def batch_progress(self, batch_num: int, tokens: int, reward: float, speed: float, loss: float = None,
+                       topk_reward: float = None, venn_reward: float = None):
         """Log batch progress."""
-        self.info(f"  Batch {batch_num}: {tokens:,} tokens, loss={loss:.4f}, {speed:.0f} tok/s")
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  Batch {batch_num}: {tokens:,} tokens, {reward_msg}, {speed:.0f} tok/s"
+        self.info(msg)
 
-    def article_progress(self, idx: int, title: str, tokens: int, loss: float, vocab: int):
+    def article_progress(self, idx: int, title: str, tokens: int, reward: float, vocab: int, loss: float = None,
+                         topk_reward: float = None, venn_reward: float = None):
         """Log Wikipedia article progress."""
         # Truncate title if too long
         if len(title) > 30:
             title = title[:27] + "..."
-        self.info(f"  [{idx}] {title}: {tokens:,} tok, loss={loss:.4f}, vocab={vocab:,}")
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  [{idx}] {title}: {tokens:,} tok, {reward_msg}, vocab={vocab:,}"
+        self.info(msg)
 
     def checkpoint_save(self, name: str):
         """Log checkpoint save."""
@@ -173,9 +198,11 @@ class TrainingLogger:
         if num_words > 0:
             self.debug(f"  Synced {num_words} new words to GPU")
 
-    def stats_update(self, loss: float, vocab_size: int, tokens_total: int, speed: float = 0):
+    def stats_update(self, reward: float, vocab_size: int, tokens_total: int, speed: float = 0, loss: float = None,
+                    topk_reward: float = None, venn_reward: float = None):
         """Log periodic stats update."""
-        msg = f"  Stats: loss={loss:.4f}, vocab={vocab_size:,}, tokens={tokens_total:,}"
+        reward_msg = self._format_reward(reward, topk_reward, venn_reward, loss)
+        msg = f"  Stats: {reward_msg}, vocab={vocab_size:,}, tokens={tokens_total:,}"
         if speed > 0:
             msg += f", {speed:.0f} tok/s"
         self.info(msg)
@@ -195,10 +222,14 @@ class TrainingLogger:
         self._flush()
         self.info(f"--- Validation ({num_samples} samples) ---")
 
-    def validation_result(self, val_loss: float, best_loss: float, improved: bool):
+    def validation_result(self, val_reward: float, best_reward: float, improved: bool, loss: float = None, best_loss: float = None):
         """Log validation result."""
-        status = "NEW BEST" if improved else f"best: {best_loss:.4f}"
-        self.info(f"  Validation loss: {val_loss:.4f} ({status})")
+        status = "NEW BEST" if improved else (f"best reward: {best_reward:.4f}" if best_reward is not None else "")
+        msg = f"  Validation reward: {val_reward:.4f} ({status})"
+        if loss is not None:
+            best_loss_str = f"best loss: {best_loss:.4f}" if best_loss is not None else ""
+            msg += f" | pseudo-loss={loss:.4f} {best_loss_str}"
+        self.info(msg)
 
     def validation_early_stop(self, patience: int):
         """Log early stopping triggered."""

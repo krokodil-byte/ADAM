@@ -21,15 +21,26 @@ class TrainingMetrics:
     total_cycles: int = 0
     total_tokens: int = 0
 
-    # Loss tracking
+    # Loss/reward tracking
     current_loss: float = 0.0
+    current_reward: float = 0.0
+    current_topk_reward: float = 0.0
+    current_venn_reward: float = 0.0
     loss_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    reward_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    topk_history: deque = field(default_factory=lambda: deque(maxlen=1000))
+    venn_history: deque = field(default_factory=lambda: deque(maxlen=1000))
 
     # Validation metrics
     validation_loss: float = 0.0
+    validation_reward: float = float('-inf')
     best_validation_loss: float = float('inf')
+    best_validation_reward: float = float('-inf')
     validation_history: deque = field(default_factory=lambda: deque(maxlen=100))
     validations_without_improvement: int = 0
+
+    # Best reward seen during training
+    best_reward: float = float('-inf')
 
     # Performance
     tokens_per_second: float = 0.0
@@ -70,6 +81,7 @@ class StatsCollector:
 
         # Buffers per medie mobili
         self.loss_window = deque(maxlen=window_size)
+        self.reward_window = deque(maxlen=window_size)
         self.speed_window = deque(maxlen=window_size)
 
         # Checkpoints
@@ -82,6 +94,9 @@ class StatsCollector:
                cycles: int = None,
                tokens: int = None,
                loss: float = None,
+               reward: float = None,
+               topk_reward: float = None,
+               venn_reward: float = None,
                vocab_size: int = None,
                vocab_utilization: float = None):
         """Aggiorna metriche"""
@@ -110,6 +125,23 @@ class StatsCollector:
             if self._update_count % self.history_sample_rate == 0:
                 self.metrics.loss_history.append((now, loss))
 
+        if reward is not None:
+            self.metrics.current_reward = reward
+            self.metrics.best_reward = max(self.metrics.best_reward, reward)
+            self.reward_window.append(reward)
+            if self._update_count % self.history_sample_rate == 0:
+                self.metrics.reward_history.append((now, reward))
+
+        if topk_reward is not None:
+            self.metrics.current_topk_reward = topk_reward
+            if self._update_count % self.history_sample_rate == 0:
+                self.metrics.topk_history.append((now, topk_reward))
+
+        if venn_reward is not None:
+            self.metrics.current_venn_reward = venn_reward
+            if self._update_count % self.history_sample_rate == 0:
+                self.metrics.venn_history.append((now, venn_reward))
+
         if vocab_size is not None:
             self.metrics.vocab_size = vocab_size
 
@@ -135,6 +167,17 @@ class StatsCollector:
         
         recent = list(self.loss_window)[-window:]
         return sum(recent) / len(recent) if recent else 0.0
+
+    def get_average_reward(self, window: Optional[int] = None) -> float:
+        """Media reward su finestra"""
+        if not self.reward_window:
+            return 0.0
+
+        if window is None:
+            window = len(self.reward_window)
+
+        recent = list(self.reward_window)[-window:]
+        return sum(recent) / len(recent) if recent else 0.0
     
     def get_elapsed_time(self) -> float:
         """Tempo elapsed in secondi"""
@@ -143,13 +186,20 @@ class StatsCollector:
     def get_summary(self) -> Dict:
         """Ottieni summary completo"""
         elapsed = self.get_elapsed_time()
-        
+
         return {
             'cycles': self.metrics.total_cycles,
             'tokens': self.metrics.total_tokens,
             'loss': self.metrics.current_loss,
             'loss_avg': self.get_average_loss(window=100),
             'perplexity': self.get_perplexity(),
+            'reward': self.metrics.current_reward,
+            'topk_reward': self.metrics.current_topk_reward,
+            'venn_reward': self.metrics.current_venn_reward,
+            'reward_avg': self.get_average_reward(window=100),
+            'best_reward': self.metrics.best_reward,
+            'validation_reward': self.metrics.validation_reward,
+            'best_validation_reward': self.metrics.best_validation_reward,
             'tokens_per_sec': self.metrics.tokens_per_second,
             'cycles_per_sec': self.metrics.cycles_per_second,
             'vocab_size': self.metrics.vocab_size,
