@@ -106,9 +106,10 @@ class StatsCollector:
         self._update_count += 1
 
         if cycles is not None:
+            prev_cycles = self.metrics.total_cycles
             self.metrics.total_cycles = cycles
-            if dt > 0:
-                self.metrics.cycles_per_second = (cycles - self.metrics.total_cycles) / dt
+            if dt > 0 and cycles >= prev_cycles:
+                self.metrics.cycles_per_second = (cycles - prev_cycles) / dt
 
         if tokens is not None:
             delta_tokens = tokens - self.metrics.total_tokens
@@ -118,12 +119,18 @@ class StatsCollector:
                 self.speed_window.append(tps)
                 self.metrics.tokens_per_second = sum(self.speed_window) / len(self.speed_window)
 
-        if loss is not None:
-            self.metrics.current_loss = loss
-            self.loss_window.append(loss)
+        # Derive pseudo-loss from reward when only reward is provided so legacy
+        # consumers still see a monotonic signal.
+        pseudo_loss = loss
+        if pseudo_loss is None and reward is not None:
+            pseudo_loss = -reward
+
+        if pseudo_loss is not None:
+            self.metrics.current_loss = pseudo_loss
+            self.loss_window.append(pseudo_loss)
             # Downsample history recording for performance
             if self._update_count % self.history_sample_rate == 0:
-                self.metrics.loss_history.append((now, loss))
+                self.metrics.loss_history.append((now, pseudo_loss))
 
         if reward is not None:
             self.metrics.current_reward = reward
@@ -215,9 +222,10 @@ class StatsCollector:
         
         print(f"{prefix}Cycles: {stats['cycles']:,}")
         print(f"{prefix}Tokens: {stats['tokens']:,}")
-        print(f"{prefix}Loss: {stats['loss']:.4f} (avg: {stats['loss_avg']:.4f})")
+        print(f"{prefix}Pseudo-loss: {stats['loss']:.4f} (avg: {stats['loss_avg']:.4f})")
+        print(f"{prefix}Rewards: r₁={stats['topk_reward']:.4f}  r₂={stats['venn_reward']:.4f}  r*={stats['reward']:.4f} (avg: {stats['reward_avg']:.4f})")
         print(f"{prefix}Perplexity: {stats['perplexity']:.2f}")
-        print(f"{prefix}Speed: {stats['tokens_per_sec']:.0f} tokens/sec")
+        print(f"{prefix}Speed: {stats['tokens_per_sec']:.0f} tokens/sec | Cycles/s: {stats['cycles_per_sec']:.0f}")
         print(f"{prefix}Vocab: {stats['vocab_size']:,} words ({stats['vocab_utilization']*100:.1f}%)")
         print(f"{prefix}Elapsed: {elapsed_str}")
     
