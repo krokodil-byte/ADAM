@@ -429,12 +429,14 @@ class WikipediaTrainer:
                 cycles=brain_stats['cycles'],
                 tokens=brain_stats['tokens'],
                 loss=brain_stats['loss'],
+                reward=brain_stats['reward'],
                 vocab_size=brain_stats['vocab_words']
             )
 
             if verbose and article_num % 10 == 0:
                 self.logger.article_progress(
-                    article_num, title, processed, brain_stats['loss'], brain_stats['vocab_words']
+                    article_num, title, processed, brain_stats['reward'], brain_stats['vocab_words'],
+                    loss=brain_stats['loss']
                 )
 
             # Auto-save
@@ -508,7 +510,7 @@ class WikipediaStreamTrainer:
 
         # Validation state
         self.val_articles: List[Tuple[str, str]] = []
-        self.best_val_loss = float('inf')
+        self.best_val_reward = float('-inf')
         self.validations_without_improvement = 0
 
     def _fetch_validation_articles(self):
@@ -533,7 +535,7 @@ class WikipediaStreamTrainer:
         Run validation on validation articles.
 
         Returns:
-            Average validation loss
+            Average validation reward
         """
         if not self.val_articles:
             return -1.0
@@ -541,13 +543,13 @@ class WikipediaStreamTrainer:
         # Defer GPU syncs during validation to avoid contention
         self.brain.begin_validation()
 
-        total_loss = 0.0
+        total_reward = 0.0
         count = 0
 
         for title, text in self.val_articles:
-            loss = self.brain.validate_on_text(text)
-            if loss >= 0:
-                total_loss += loss
+            reward = self.brain.validate_on_text(text)
+            if reward != -1.0:
+                total_reward += reward
                 count += 1
 
         # Resume normal sync after validation
@@ -556,22 +558,24 @@ class WikipediaStreamTrainer:
         if count == 0:
             return -1.0
 
-        avg_loss = total_loss / count
+        avg_reward = total_reward / count
 
         # Update stats
-        self.stats.metrics.validation_loss = avg_loss
-        self.stats.metrics.validation_history.append((time.time(), avg_loss))
+        self.stats.metrics.validation_reward = avg_reward
+        self.stats.metrics.validation_loss = -avg_reward  # legacy compatibility
+        self.stats.metrics.validation_history.append((time.time(), avg_reward))
 
         # Check for improvement
-        if avg_loss < self.best_val_loss:
-            self.best_val_loss = avg_loss
-            self.stats.metrics.best_validation_loss = avg_loss
+        if avg_reward > self.best_val_reward:
+            self.best_val_reward = avg_reward
+            self.stats.metrics.best_validation_reward = avg_reward
+            self.stats.metrics.best_validation_loss = -avg_reward
             self.validations_without_improvement = 0
         else:
             self.validations_without_improvement += 1
             self.stats.metrics.validations_without_improvement = self.validations_without_improvement
 
-        return avg_loss
+        return avg_reward
 
     def train(self,
               max_articles: Optional[int] = None,
@@ -724,7 +728,9 @@ class WikipediaStreamTrainer:
 
                 if verbose:
                     tokens_per_sec = batch_tokens / batch_time if batch_time > 0 else 0
-                    self.logger.batch_progress(batch_num, batch_tokens, brain_stats['loss'], tokens_per_sec)
+                    self.logger.batch_progress(
+                        batch_num, batch_tokens, brain_stats['reward'], tokens_per_sec, loss=brain_stats['loss']
+                    )
 
                 # 3. Clear buffer
                 self.fetcher.clear_buffer()
@@ -737,8 +743,10 @@ class WikipediaStreamTrainer:
         final_stats = self.stats.get_summary()
 
         # Add validation stats
+        final_stats['validation_reward'] = self.stats.metrics.validation_reward
+        final_stats['best_validation_reward'] = self.best_val_reward
         final_stats['validation_loss'] = self.stats.metrics.validation_loss
-        final_stats['best_validation_loss'] = self.best_val_loss
+        final_stats['best_validation_loss'] = self.stats.metrics.best_validation_loss
         final_stats['early_stopped'] = early_stopped
 
         if verbose:
@@ -748,11 +756,14 @@ class WikipediaStreamTrainer:
                 'tokens': total_tokens,
                 'speed': total_tokens/elapsed if elapsed > 0 else 0,
                 'loss': final_stats['loss'],
+                'reward': final_stats.get('reward', 0.0),
                 'vocab': final_stats['vocab_size']
             }
             if self.val_articles:
+                end_kwargs['validation_reward'] = self.stats.metrics.validation_reward
+                end_kwargs['best_val_reward'] = self.best_val_reward
                 end_kwargs['validation_loss'] = self.stats.metrics.validation_loss
-                end_kwargs['best_val_loss'] = self.best_val_loss
+                end_kwargs['best_val_loss'] = self.stats.metrics.best_validation_loss
             if early_stopped:
                 end_kwargs['status'] = 'early_stopped'
 
@@ -827,7 +838,8 @@ class WikipediaStreamTrainer:
                 if verbose and processed_count[0] % 10 == 0:
                     stats = self.brain.get_stats()
                     self.logger.article_progress(
-                        processed_count[0], title, tokens, stats['loss'], stats['vocab_words']
+                        processed_count[0], title, tokens, stats['reward'], stats['vocab_words'],
+                        loss=stats['loss']
                     )
             else:
                 # More batches than articles - pipeline is chunking internally
@@ -844,10 +856,16 @@ class WikipediaStreamTrainer:
                 article_num % self.validation_frequency == 0):
                 if verbose:
                     self.logger.validation_start(len(self.val_articles))
-                val_loss = self._run_validation()
+                val_reward = self._run_validation()
                 if verbose:
                     improved = (self.validations_without_improvement == 0)
-                    self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                    self.logger.validation_result(
+                        val_reward,
+                        self.best_val_reward,
+                        improved,
+                        loss=self.stats.metrics.validation_loss,
+                        best_loss=self.stats.metrics.best_validation_loss
+                    )
                     self.logger.validation_complete()
 
             # Auto-save check (only for actual articles, not internal chunks)
@@ -869,6 +887,7 @@ class WikipediaStreamTrainer:
                 cycles=brain_stats['cycles'],
                 tokens=brain_stats['tokens'],
                 loss=brain_stats['loss'],
+                reward=brain_stats['reward'],
                 vocab_size=brain_stats['vocab_words']
             )
 
@@ -879,17 +898,26 @@ class WikipediaStreamTrainer:
         if verbose:
             stats = self.brain.get_stats()
             self.logger.info("=" * 70)
-            self.logger.info(f"✅ PASS {pass_num} COMPLETE - Loss: {stats['loss']:.4f}, Vocab: {stats['vocab_words']} words")
+            self.logger.info(
+                f"✅ PASS {pass_num} COMPLETE - Reward: {stats['reward']:.4f} (pseudo-loss={stats['loss']:.4f}), "
+                f"Vocab: {stats['vocab_words']} words"
+            )
             self.logger.info("=" * 70)
 
         # Validate at end of pass (if validate_per_pass is True)
         if enable_validation and self.val_articles and self.validate_per_pass:
             if verbose:
                 self.logger.validation_start(len(self.val_articles))
-            val_loss = self._run_validation()
+            val_reward = self._run_validation()
             if verbose:
                 improved = (self.validations_without_improvement == 0)
-                self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                self.logger.validation_result(
+                    val_reward,
+                    self.best_val_reward,
+                    improved,
+                    loss=self.stats.metrics.validation_loss,
+                    best_loss=self.stats.metrics.best_validation_loss
+                )
                 self.logger.validation_complete()
 
         # End deferred sync - execute all batched vocab syncs

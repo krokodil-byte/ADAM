@@ -86,6 +86,16 @@
 #include "reward_system.cu"  // Reward-based learning (replaces cross-entropy)
 #include "reward_backward.cu"  // Reward-based backward pass
 
+// Runtime configuration (populated by set_model_config from Python)
+// Declared early so all functions can access the runtime-adjusted values.
+static int runtime_num_layers = NUM_LAYERS;
+static int runtime_embed_dim = EMBED_DIM;
+static int runtime_num_heads = NUM_HEADS;
+static int runtime_max_seq_len = MAX_SEQ_LEN;
+static int runtime_num_venn_heads = NUM_VENN_HEADS;
+static int runtime_venn_clusters = VENN_CLUSTERS;
+static int runtime_venn_head_dim = VENN_HEAD_DIM;
+
 typedef enum {
     MODE_EXTERNAL_INPUT = 0,
     MODE_SELF_LOOP = 1,
@@ -271,7 +281,7 @@ typedef struct {
     long long total_cycles;
     long long total_tokens;
     time_t timestamp;
-    float current_loss;
+    float current_reward;
     float learning_rate;
     float momentum;
 } CheckpointHeader;
@@ -1385,9 +1395,9 @@ void* background_self_training(void* arg) {
                 system->llm.venn_similarities,
                 seq_len,
                 TOTAL_VOCAB_SIZE,
-                EMBED_DIM,
-                NUM_VENN_HEADS,
-                VENN_CLUSTERS
+                runtime_embed_dim,
+                runtime_num_venn_heads,
+                runtime_venn_clusters
             );
 
             // Combine rewards
@@ -1515,30 +1525,33 @@ void* background_self_training(void* arg) {
 
             if (system->venn.enable_multihead) {
                 // REVOLUTIONARY: Multi-Head Venn for O(clusters²) instead of O(n²)!
+                const int venn_clusters = runtime_venn_clusters;
+                const int num_venn_heads = runtime_num_venn_heads;
+                const int venn_head_dim = runtime_venn_head_dim;
 
                 // Step 1: Extract semantic state per head from hidden states
-                dim3 grid_extract(NUM_VENN_HEADS, 1);
-                dim3 block_extract(VENN_HEAD_DIM);
+                dim3 grid_extract(num_venn_heads, 1);
+                dim3 block_extract(venn_head_dim);
                 extract_semantic_per_head_kernel<<<grid_extract, block_extract, 0, system->gpu.venn_stream>>>(
                     system->llm.hidden_states,
                     system->llm.semantic_state,  // Reuse as [NUM_VENN_HEADS x VENN_HEAD_DIM]
                     seq_len,
-                    EMBED_DIM,
-                    NUM_VENN_HEADS,
-                    VENN_HEAD_DIM
+                    runtime_embed_dim,
+                    num_venn_heads,
+                    venn_head_dim
                 );
 
                 // Step 2: Navigate Venn space in parallel for all heads
-                dim3 grid_nav(NUM_VENN_HEADS, (VENN_CLUSTERS + 255) / 256);
+                dim3 grid_nav(num_venn_heads, (venn_clusters + 255) / 256);
                 dim3 block_nav(256);
                 navigate_venn_multihead_kernel<<<grid_nav, block_nav, 0, system->gpu.venn_stream>>>(
                     system->llm.semantic_state,
                     system->venn.cluster_centers,
                     system->venn.intersection_matrix,
                     system->venn.cluster_activations,
-                    VENN_HEAD_DIM,
-                    VENN_CLUSTERS,
-                    NUM_VENN_HEADS,
+                    venn_head_dim,
+                    venn_clusters,
+                    num_venn_heads,
                     system->llm.exploration_temperature,
                     system->venn.config.propagation_factor,
                     system->venn.config.intersection_threshold,
@@ -1546,45 +1559,45 @@ void* background_self_training(void* arg) {
                 );
 
                 // Step 3: Compute head outputs from cluster activations
-                dim3 grid_outputs(NUM_VENN_HEADS);
-                dim3 block_outputs(VENN_HEAD_DIM);
+                dim3 grid_outputs(num_venn_heads);
+                dim3 block_outputs(venn_head_dim);
                 compute_venn_head_outputs_kernel<<<grid_outputs, block_outputs, 0, system->gpu.venn_stream>>>(
                     system->venn.cluster_activations,
                     system->venn.cluster_centers,
                     system->venn.head_outputs,
-                    NUM_VENN_HEADS,
-                    VENN_CLUSTERS,
-                    VENN_HEAD_DIM
+                    num_venn_heads,
+                    venn_clusters,
+                    venn_head_dim
                 );
 
                 // Step 4: Concatenate all heads into final output
-                dim3 grid_concat((EMBED_DIM + 255) / 256);
+                dim3 grid_concat((runtime_embed_dim + 255) / 256);
                 dim3 block_concat(256);
                 concat_venn_heads_kernel<<<grid_concat, block_concat, 0, system->gpu.venn_stream>>>(
                     system->venn.head_outputs,
                     system->llm.semantic_state,  // Write back concatenated result
-                    NUM_VENN_HEADS,
-                    VENN_HEAD_DIM
+                    num_venn_heads,
+                    venn_head_dim
                 );
 
             } else {
                 // Legacy single-head mode (backward compatibility)
-                dim3 grid_semantic((EMBED_DIM + 255) / 256);
+                dim3 grid_semantic((runtime_embed_dim + 255) / 256);
                 extract_semantic_embedding_kernel<<<grid_semantic, block, 0, system->gpu.venn_stream>>>(
                     system->llm.hidden_states,
                     system->llm.semantic_state,
                     seq_len,
-                    EMBED_DIM
+                    runtime_embed_dim
                 );
 
-                dim3 grid_venn((VENN_CLUSTERS + 255) / 256);
+                dim3 grid_venn((runtime_venn_clusters + 255) / 256);
                 navigate_venn_space_kernel<<<grid_venn, block, 0, system->gpu.venn_stream>>>(
                     system->llm.semantic_state,
                     system->venn.cluster_centers,
                     system->venn.intersection_matrix,
                     system->llm.cluster_activations,
-                    EMBED_DIM,
-                    VENN_CLUSTERS,
+                    runtime_embed_dim,
+                    runtime_venn_clusters,
                     system->llm.exploration_temperature,
                     system->venn.config.propagation_factor,
                     system->venn.config.intersection_threshold,
@@ -1595,16 +1608,16 @@ void* background_self_training(void* arg) {
             // Sample new tokens from semantic space (works with both modes)
             // Uses first head's activations for sampling in multi-head mode
             dim3 grid_sample((seq_len + 255) / 256);
-            sample_from_semantic_space_kernel<<<grid_sample, block, 0, system->gpu.venn_stream>>>(
-                system->venn.enable_multihead ? system->venn.cluster_activations : system->llm.cluster_activations,
-                system->venn.token_memberships,  // Uses first head's memberships
-                system->venn.membership_weights,
-                system->llm.current_sequence,
-                seq_len,
-                TOTAL_VOCAB_SIZE,
-                VENN_CLUSTERS,
-                system->llm.random_seed++
-            );
+                sample_from_semantic_space_kernel<<<grid_sample, block, 0, system->gpu.venn_stream>>>(
+                    system->venn.enable_multihead ? system->venn.cluster_activations : system->llm.cluster_activations,
+                    system->venn.token_memberships,  // Uses first head's memberships
+                    system->venn.membership_weights,
+                    system->llm.current_sequence,
+                    seq_len,
+                    TOTAL_VOCAB_SIZE,
+                    runtime_venn_clusters,
+                    system->llm.random_seed++
+                );
             
             // 6. STATISTICS UPDATE
             // --------------------
@@ -1618,10 +1631,11 @@ void* background_self_training(void* arg) {
                 cudaStreamSynchronize(system->gpu.main_stream);
                 cudaStreamSynchronize(system->gpu.venn_stream);
                 
-                // NOW safe to read loss
-                float h_loss;
-                cudaMemcpy(&h_loss, &system->llm.current_loss, sizeof(float), cudaMemcpyDeviceToHost);
-                system->current_perplexity = expf(h_loss);
+                // NOW safe to read reward metrics
+                float h_reward;
+                cudaMemcpy(&h_reward, &system->llm.current_reward, sizeof(float), cudaMemcpyDeviceToHost);
+                // Map reward to a pseudo-perplexity metric for compatibility (higher reward -> lower perplexity)
+                system->current_perplexity = expf(-h_reward);
             }
             
             // ========================================================================
@@ -1637,16 +1651,16 @@ void* background_self_training(void* arg) {
                     system->venn.token_memberships,
                     system->venn.membership_weights,
                     CHAR_VOCAB_SIZE,
-                    EMBED_DIM,
-                    VENN_CLUSTERS
+                    runtime_embed_dim,
+                    runtime_venn_clusters
                 );
                 
                 // Step 2: Zero cluster accumulators
-                cudaMemsetAsync(system->venn.cluster_sums, 0, 
-                               VENN_CLUSTERS * EMBED_DIM * sizeof(float),
+                cudaMemsetAsync(system->venn.cluster_sums, 0,
+                               runtime_venn_clusters * runtime_embed_dim * sizeof(float),
                                system->gpu.venn_stream);
                 cudaMemsetAsync(system->venn.cluster_counts, 0,
-                               VENN_CLUSTERS * sizeof(float),
+                               runtime_venn_clusters * sizeof(float),
                                system->gpu.venn_stream);
                 
                 // Step 3: Accumulate weighted embeddings per cluster
@@ -1657,29 +1671,29 @@ void* background_self_training(void* arg) {
                     system->venn.cluster_sums,
                     system->venn.cluster_counts,
                     CHAR_VOCAB_SIZE,
-                    EMBED_DIM,
-                    VENN_CLUSTERS
+                    runtime_embed_dim,
+                    runtime_venn_clusters
                 );
                 
                 // Step 4: NUOVO - Update cluster centers (smooth)
-                dim3 grid_centers(VENN_CLUSTERS);
-                update_cluster_centers_kernel<<<grid_centers, EMBED_DIM, 0, system->gpu.venn_stream>>>(
+                dim3 grid_centers(runtime_venn_clusters);
+                update_cluster_centers_kernel<<<grid_centers, runtime_embed_dim, 0, system->gpu.venn_stream>>>(
                     system->venn.cluster_sums,
                     system->venn.cluster_counts,
                     system->venn.cluster_centers,
-                    VENN_CLUSTERS,
-                    EMBED_DIM,
+                    runtime_venn_clusters,
+                    runtime_embed_dim,
                     0.1f  // Learning rate per smooth update (10% new, 90% old)
                 );
                 
                 // Step 5: Recompute intersection matrix
                 // OPTIMIZED: Launch with 256 threads per block for parallel reduction (10-20x speedup)
-                dim3 grid_intersect(VENN_CLUSTERS, VENN_CLUSTERS);
+                dim3 grid_intersect(runtime_venn_clusters, runtime_venn_clusters);
                 compute_venn_intersections_kernel<<<grid_intersect, 256, 0, system->gpu.venn_stream>>>(
                     system->venn.cluster_centers,
                     system->venn.intersection_matrix,
-                    VENN_CLUSTERS,
-                    EMBED_DIM,
+                    runtime_venn_clusters,
+                    runtime_embed_dim,
                     0.5f
                 );
             }
@@ -1702,19 +1716,17 @@ extern "C" {
 
 static UnifiedVectorLLM* g_system = NULL;
 
-// Runtime model configuration (set by Python before init)
-static int runtime_num_layers = NUM_LAYERS;
-static int runtime_embed_dim = EMBED_DIM;
-static int runtime_num_heads = NUM_HEADS;
-static int runtime_max_seq_len = MAX_SEQ_LEN;
-
-extern "C" void set_model_config(int num_layers, int embed_dim, int num_heads, int max_seq_len) {
+extern "C" void set_model_config(int num_layers, int embed_dim, int num_heads, int max_seq_len,
+                                 int num_venn_heads, int venn_clusters) {
     runtime_num_layers = num_layers;
     runtime_embed_dim = embed_dim;
     runtime_num_heads = num_heads;
     runtime_max_seq_len = max_seq_len;
-    printf("✓ CUDA model config: %d layers, %d dim, %d heads, %d seq_len\n",
-           num_layers, embed_dim, num_heads, max_seq_len);
+    runtime_num_venn_heads = num_venn_heads;
+    runtime_venn_clusters = venn_clusters;
+    runtime_venn_head_dim = (num_venn_heads > 0) ? (embed_dim / num_venn_heads) : VENN_HEAD_DIM;
+    printf("✓ CUDA model config: %d layers, %d dim, %d heads, %d seq_len, %d venn_heads, %d clusters\n",
+           num_layers, embed_dim, num_heads, max_seq_len, num_venn_heads, venn_clusters);
 }
 
 int init_system(void) {
@@ -1725,6 +1737,9 @@ int init_system(void) {
     const int embed_dim = runtime_embed_dim;
     const int max_seq_len = runtime_max_seq_len;
     const int total_vocab = CHAR_VOCAB_SIZE + MAX_WORD_VOCAB_SIZE;
+    const int num_venn_heads = runtime_num_venn_heads;
+    const int venn_clusters = runtime_venn_clusters;
+    const int venn_head_dim = runtime_venn_head_dim;
 
     cudaSetDevice(0);
     cudaStreamCreate(&g_system->gpu.main_stream);
@@ -1792,9 +1807,9 @@ int init_system(void) {
     cudaMemset(g_system->llm.avg_final_reward, 0, sizeof(float));
 
     // Allocate semantic navigation buffers
-    cudaMalloc(&g_system->llm.semantic_state, EMBED_DIM * sizeof(float));
-    cudaMalloc(&g_system->llm.cluster_activations, VENN_CLUSTERS * sizeof(float));
-    cudaMalloc(&g_system->llm.current_sequence, MAX_SEQ_LEN * sizeof(int));
+    cudaMalloc(&g_system->llm.semantic_state, embed_dim * sizeof(float));
+    cudaMalloc(&g_system->llm.cluster_activations, venn_clusters * sizeof(float));
+    cudaMalloc(&g_system->llm.current_sequence, max_seq_len * sizeof(int));
     
     // Allocate Venn system - MULTI-HEAD ARCHITECTURE
     // Enable multi-head mode by default (revolutionary!)
@@ -1802,31 +1817,31 @@ int init_system(void) {
 
     // Allocate per-head cluster centers: [NUM_VENN_HEADS x VENN_CLUSTERS x VENN_HEAD_DIM]
     cudaMalloc(&g_system->venn.cluster_centers,
-               NUM_VENN_HEADS * VENN_CLUSTERS * VENN_HEAD_DIM * sizeof(float));
+               num_venn_heads * venn_clusters * venn_head_dim * sizeof(float));
 
     // Allocate per-head token memberships: [NUM_VENN_HEADS x CHAR_VOCAB_SIZE x 2]
     cudaMalloc(&g_system->venn.token_memberships,
-               NUM_VENN_HEADS * CHAR_VOCAB_SIZE * 2 * sizeof(int));
+               num_venn_heads * CHAR_VOCAB_SIZE * 2 * sizeof(int));
 
     // Allocate per-head membership weights: [NUM_VENN_HEADS x CHAR_VOCAB_SIZE x 2]
     cudaMalloc(&g_system->venn.membership_weights,
-               NUM_VENN_HEADS * CHAR_VOCAB_SIZE * 2 * sizeof(float));
+               num_venn_heads * CHAR_VOCAB_SIZE * 2 * sizeof(float));
 
     // Allocate per-head intersection matrices: [NUM_VENN_HEADS x VENN_CLUSTERS x VENN_CLUSTERS]
     cudaMalloc(&g_system->venn.intersection_matrix,
-               NUM_VENN_HEADS * VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float));
+               num_venn_heads * venn_clusters * venn_clusters * sizeof(float));
 
     // Allocate k-means buffers per-head
     cudaMalloc(&g_system->venn.cluster_sums,
-               NUM_VENN_HEADS * VENN_CLUSTERS * VENN_HEAD_DIM * sizeof(float));
+               num_venn_heads * venn_clusters * venn_head_dim * sizeof(float));
     cudaMalloc(&g_system->venn.cluster_counts,
-               NUM_VENN_HEADS * VENN_CLUSTERS * sizeof(float));
+               num_venn_heads * venn_clusters * sizeof(float));
 
     // Allocate multi-head activations and outputs
     cudaMalloc(&g_system->venn.cluster_activations,
-               NUM_VENN_HEADS * VENN_CLUSTERS * sizeof(float));
+               num_venn_heads * venn_clusters * sizeof(float));
     cudaMalloc(&g_system->venn.head_outputs,
-               NUM_VENN_HEADS * VENN_HEAD_DIM * sizeof(float));
+               num_venn_heads * venn_head_dim * sizeof(float));
     
     // Allocate episodic memory
     cudaMalloc(&g_system->episodic.episode_embeddings, EPISODIC_BUFFER_SIZE * EMBED_DIM * sizeof(float));
@@ -1838,19 +1853,19 @@ int init_system(void) {
     curandSetPseudoRandomGeneratorSeed(gen, time(NULL));
     
     // Xavier initialization for embeddings (DUAL)
-    float xavier_std_char = sqrtf(2.0f / (CHAR_VOCAB_SIZE + EMBED_DIM));
-    float xavier_std_word = sqrtf(2.0f / (MAX_WORD_VOCAB_SIZE + EMBED_DIM));
-    float xavier_std_out = sqrtf(2.0f / (TOTAL_VOCAB_SIZE + EMBED_DIM));
-    
-    curandGenerateNormal(gen, g_system->llm.char_embeddings, CHAR_VOCAB_SIZE * EMBED_DIM, 0.0f, xavier_std_char);
-    curandGenerateNormal(gen, g_system->llm.word_embeddings, MAX_WORD_VOCAB_SIZE * EMBED_DIM, 0.0f, xavier_std_word);
-    curandGenerateNormal(gen, g_system->llm.pos_embeddings, MAX_SEQ_LEN * EMBED_DIM, 0.0f, 0.02f);
-    curandGenerateNormal(gen, g_system->llm.output_weights, TOTAL_VOCAB_SIZE * EMBED_DIM, 0.0f, xavier_std_out);
+    float xavier_std_char = sqrtf(2.0f / (CHAR_VOCAB_SIZE + embed_dim));
+    float xavier_std_word = sqrtf(2.0f / (MAX_WORD_VOCAB_SIZE + embed_dim));
+    float xavier_std_out = sqrtf(2.0f / (TOTAL_VOCAB_SIZE + embed_dim));
+
+    curandGenerateNormal(gen, g_system->llm.char_embeddings, CHAR_VOCAB_SIZE * embed_dim, 0.0f, xavier_std_char);
+    curandGenerateNormal(gen, g_system->llm.word_embeddings, MAX_WORD_VOCAB_SIZE * embed_dim, 0.0f, xavier_std_word);
+    curandGenerateNormal(gen, g_system->llm.pos_embeddings, max_seq_len * embed_dim, 0.0f, 0.02f);
+    curandGenerateNormal(gen, g_system->llm.output_weights, TOTAL_VOCAB_SIZE * embed_dim, 0.0f, xavier_std_out);
     
     // Initialize Venn cluster centers for all heads
     // Each head gets its own randomly initialized cluster centers
     curandGenerateNormal(gen, g_system->venn.cluster_centers,
-                        NUM_VENN_HEADS * VENN_CLUSTERS * VENN_HEAD_DIM, 0.0f, 0.1f);
+                        num_venn_heads * venn_clusters * venn_head_dim, 0.0f, 0.1f);
 
     // Initialize Venn configuration with defaults (from config.py)
     g_system->venn.config.propagation_factor = 0.2f;           // VENN_PROPAGATION_FACTOR
@@ -1869,34 +1884,34 @@ int init_system(void) {
 
     // Initialize token memberships and weights for all heads
     // Each head gets its own random assignments (allows heads to specialize!)
-    int* h_memberships = (int*)malloc(NUM_VENN_HEADS * CHAR_VOCAB_SIZE * 2 * sizeof(int));
-    float* h_weights = (float*)malloc(NUM_VENN_HEADS * CHAR_VOCAB_SIZE * 2 * sizeof(float));
+    int* h_memberships = (int*)malloc(num_venn_heads * CHAR_VOCAB_SIZE * 2 * sizeof(int));
+    float* h_weights = (float*)malloc(num_venn_heads * CHAR_VOCAB_SIZE * 2 * sizeof(float));
 
-    for (int head = 0; head < NUM_VENN_HEADS; head++) {
+    for (int head = 0; head < num_venn_heads; head++) {
         for (int i = 0; i < CHAR_VOCAB_SIZE; i++) {
             int base_idx = head * CHAR_VOCAB_SIZE * 2 + i * 2;
-            h_memberships[base_idx] = rand() % VENN_CLUSTERS;      // Primary cluster
-            h_memberships[base_idx + 1] = rand() % VENN_CLUSTERS;  // Secondary cluster
+            h_memberships[base_idx] = rand() % venn_clusters;      // Primary cluster
+            h_memberships[base_idx + 1] = rand() % venn_clusters;  // Secondary cluster
             h_weights[base_idx] = g_system->venn.config.primary_membership_weight;
             h_weights[base_idx + 1] = g_system->venn.config.secondary_membership_weight;
         }
     }
 
     cudaMemcpy(g_system->venn.token_memberships, h_memberships,
-               NUM_VENN_HEADS * CHAR_VOCAB_SIZE * 2 * sizeof(int), cudaMemcpyHostToDevice);
+               num_venn_heads * CHAR_VOCAB_SIZE * 2 * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(g_system->venn.membership_weights, h_weights,
-               NUM_VENN_HEADS * CHAR_VOCAB_SIZE * 2 * sizeof(float), cudaMemcpyHostToDevice);
+               num_venn_heads * CHAR_VOCAB_SIZE * 2 * sizeof(float), cudaMemcpyHostToDevice);
     free(h_memberships);
     free(h_weights);
     
     // Initialize intersection matrices for all heads (will be computed during training)
     cudaMemset(g_system->venn.intersection_matrix, 0,
-               NUM_VENN_HEADS * VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float));
+               num_venn_heads * venn_clusters * venn_clusters * sizeof(float));
     
     // Zero momentum buffers (DUAL)
-    cudaMemset(g_system->llm.momentum_char_emb, 0, CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMemset(g_system->llm.momentum_word_emb, 0, MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float));
-    cudaMemset(g_system->llm.momentum_output, 0, TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float));
+    cudaMemset(g_system->llm.momentum_char_emb, 0, CHAR_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMemset(g_system->llm.momentum_word_emb, 0, MAX_WORD_VOCAB_SIZE * embed_dim * sizeof(float));
+    cudaMemset(g_system->llm.momentum_output, 0, TOTAL_VOCAB_SIZE * embed_dim * sizeof(float));
 
     // Initialize slot table for word_id → slot mapping (HOT/COLD ARCHITECTURE)
     printf("   Initializing slot table (max %d cold vocab)...\n", MAX_COLD_VOCAB);
@@ -2278,24 +2293,24 @@ int save_checkpoint(const char* filepath) {
     header.char_vocab_size = CHAR_VOCAB_SIZE;
     header.current_word_vocab_size = g_system->llm.current_word_vocab_size;
     header.max_word_vocab_size = MAX_WORD_VOCAB_SIZE;
-    header.embed_dim = EMBED_DIM;
-    header.num_layers = NUM_LAYERS;
-    header.num_heads = NUM_HEADS;
-    header.num_clusters = VENN_CLUSTERS;
+    header.embed_dim = runtime_embed_dim;
+    header.num_layers = runtime_num_layers;
+    header.num_heads = runtime_num_heads;
+    header.num_clusters = runtime_venn_clusters;
     header.total_cycles = g_system->self_training_cycles;
     header.total_tokens = g_system->total_tokens_processed;
     header.timestamp = time(NULL);
-    cudaMemcpy(&header.current_loss, &g_system->llm.current_loss, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&header.current_reward, &g_system->llm.current_reward, sizeof(float), cudaMemcpyDeviceToHost);
     header.learning_rate = g_system->llm.learning_rate;
     header.momentum = g_system->llm.momentum;
     
     fwrite(&header, sizeof(CheckpointHeader), 1, f);
     
     // Allocate host buffers (DUAL)
-    size_t char_emb_size = CHAR_VOCAB_SIZE * EMBED_DIM * sizeof(float);
-    size_t word_emb_size = MAX_WORD_VOCAB_SIZE * EMBED_DIM * sizeof(float);
-    size_t pos_emb_size = MAX_SEQ_LEN * EMBED_DIM * sizeof(float);
-    size_t output_size = TOTAL_VOCAB_SIZE * EMBED_DIM * sizeof(float);
+    size_t char_emb_size = CHAR_VOCAB_SIZE * runtime_embed_dim * sizeof(float);
+    size_t word_emb_size = MAX_WORD_VOCAB_SIZE * runtime_embed_dim * sizeof(float);
+    size_t pos_emb_size = runtime_max_seq_len * runtime_embed_dim * sizeof(float);
+    size_t output_size = TOTAL_VOCAB_SIZE * runtime_embed_dim * sizeof(float);
     
     float* h_char_emb = (float*)malloc(char_emb_size);
     float* h_word_emb = (float*)malloc(word_emb_size);
@@ -2307,10 +2322,10 @@ int save_checkpoint(const char* filepath) {
     float* h_momentum_output = (float*)malloc(output_size);
     
     // Buffer Venn (usa CHAR_VOCAB_SIZE)
-    size_t cluster_centers_size = VENN_CLUSTERS * EMBED_DIM * sizeof(float);
+    size_t cluster_centers_size = runtime_venn_clusters * runtime_embed_dim * sizeof(float);
     size_t token_memberships_size = CHAR_VOCAB_SIZE * 2 * sizeof(int);
     size_t membership_weights_size = CHAR_VOCAB_SIZE * 2 * sizeof(float);
-    size_t intersection_matrix_size = VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float);
+    size_t intersection_matrix_size = runtime_venn_clusters * runtime_venn_clusters * sizeof(float);
     
     float* h_cluster_centers = (float*)malloc(cluster_centers_size);
     int* h_token_memberships = (int*)malloc(token_memberships_size);
@@ -2366,8 +2381,8 @@ int save_checkpoint(const char* filepath) {
     fclose(f);
     
     g_system->last_checkpoint_time = time(NULL);
-    printf("✅ Checkpoint saved: %s (cycles: %lld, loss: %.4f)\\n", 
-           filepath, header.total_cycles, header.current_loss);
+    printf("✅ Checkpoint saved: %s (cycles: %lld, reward: %.4f)\\n",
+           filepath, header.total_cycles, header.current_reward);
     
     return 0;
 }
@@ -2425,10 +2440,10 @@ int load_checkpoint(const char* filepath) {
     float* h_momentum_output = (float*)malloc(output_size);
     
     // Venn buffers
-    size_t cluster_centers_size = VENN_CLUSTERS * EMBED_DIM * sizeof(float);
+    size_t cluster_centers_size = runtime_venn_clusters * runtime_embed_dim * sizeof(float);
     size_t token_memberships_size = CHAR_VOCAB_SIZE * 2 * sizeof(int);
     size_t membership_weights_size = CHAR_VOCAB_SIZE * 2 * sizeof(float);
-    size_t intersection_matrix_size = VENN_CLUSTERS * VENN_CLUSTERS * sizeof(float);
+    size_t intersection_matrix_size = runtime_venn_clusters * runtime_venn_clusters * sizeof(float);
     
     float* h_cluster_centers = (float*)malloc(cluster_centers_size);
     int* h_token_memberships = (int*)malloc(token_memberships_size);
@@ -2620,9 +2635,9 @@ int feed_training_batch(const int* tokens, int batch_size) {
             g_system->llm.venn_similarities,
             chunk_size,
             TOTAL_VOCAB_SIZE,
-            EMBED_DIM,
-            NUM_VENN_HEADS,
-            VENN_CLUSTERS
+            runtime_embed_dim,
+            runtime_num_venn_heads,
+            runtime_venn_clusters
         );
 
         // Combine rewards

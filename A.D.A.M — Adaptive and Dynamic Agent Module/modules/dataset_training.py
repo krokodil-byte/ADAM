@@ -414,7 +414,7 @@ class HFDatasetTrainer:
         # Validation state
         self.train_samples: List[str] = []
         self.val_samples: List[str] = []
-        self.best_val_loss = float('inf')
+        self.best_val_reward = float('-inf')
         self.validations_without_improvement = 0
 
         # Split data
@@ -448,7 +448,7 @@ class HFDatasetTrainer:
         Run validation on validation set.
 
         Returns:
-            Average validation loss
+            Average validation reward
         """
         if not self.val_samples:
             return -1.0
@@ -456,13 +456,13 @@ class HFDatasetTrainer:
         # Defer GPU syncs during validation to avoid contention
         self.brain.begin_validation()
 
-        total_loss = 0.0
+        total_reward = 0.0
         count = 0
 
         for sample in self.val_samples:
-            loss = self.brain.validate_on_text(sample)
-            if loss >= 0:
-                total_loss += loss
+            reward = self.brain.validate_on_text(sample)
+            if reward != -1.0:
+                total_reward += reward
                 count += 1
 
         # Resume normal sync after validation
@@ -471,22 +471,24 @@ class HFDatasetTrainer:
         if count == 0:
             return -1.0
 
-        avg_loss = total_loss / count
+        avg_reward = total_reward / count
 
         # Update stats
-        self.stats.metrics.validation_loss = avg_loss
-        self.stats.metrics.validation_history.append((time.time(), avg_loss))
+        self.stats.metrics.validation_reward = avg_reward
+        self.stats.metrics.validation_loss = -avg_reward  # legacy compatibility
+        self.stats.metrics.validation_history.append((time.time(), avg_reward))
 
         # Check for improvement
-        if avg_loss < self.best_val_loss:
-            self.best_val_loss = avg_loss
-            self.stats.metrics.best_validation_loss = avg_loss
+        if avg_reward > self.best_val_reward:
+            self.best_val_reward = avg_reward
+            self.stats.metrics.best_validation_reward = avg_reward
+            self.stats.metrics.best_validation_loss = -avg_reward
             self.validations_without_improvement = 0
         else:
             self.validations_without_improvement += 1
             self.stats.metrics.validations_without_improvement = self.validations_without_improvement
 
-        return avg_loss
+        return avg_reward
 
     def train(self,
               passes: int = 1,
@@ -605,8 +607,10 @@ class HFDatasetTrainer:
         final_stats = self.stats.get_summary()
 
         # Add validation stats
+        final_stats['validation_reward'] = self.stats.metrics.validation_reward
+        final_stats['best_validation_reward'] = self.best_val_reward
         final_stats['validation_loss'] = self.stats.metrics.validation_loss
-        final_stats['best_validation_loss'] = self.best_val_loss
+        final_stats['best_validation_loss'] = self.stats.metrics.best_validation_loss
         final_stats['early_stopped'] = early_stopped
 
         if verbose:
@@ -615,11 +619,14 @@ class HFDatasetTrainer:
                 'tokens': total_tokens,
                 'speed': total_tokens/elapsed if elapsed > 0 else 0,
                 'loss': final_stats['loss'],
+                'reward': final_stats.get('reward', 0.0),
                 'vocab': final_stats['vocab_size']
             }
             if self.val_samples:
+                end_kwargs['validation_reward'] = self.stats.metrics.validation_reward
+                end_kwargs['best_val_reward'] = self.best_val_reward
                 end_kwargs['validation_loss'] = self.stats.metrics.validation_loss
-                end_kwargs['best_val_loss'] = self.best_val_loss
+                end_kwargs['best_val_loss'] = self.stats.metrics.best_validation_loss
             if early_stopped:
                 end_kwargs['status'] = 'early_stopped'
 
@@ -676,7 +683,7 @@ class HFDatasetTrainer:
                 brain_stats = self.brain.get_stats()
                 self.logger.sample_progress(
                     idx, train_samples_count,
-                    tokens, brain_stats['loss']
+                    tokens, brain_stats['reward'], loss=brain_stats['loss']
                 )
 
             # Validation check (only if validate_per_pass is False)
@@ -685,10 +692,16 @@ class HFDatasetTrainer:
                 idx % self.validation_frequency == 0):
                 if verbose:
                     self.logger.validation_start(len(self.val_samples))
-                val_loss = self._run_validation()
+                val_reward = self._run_validation()
                 if verbose:
                     improved = (self.validations_without_improvement == 0)
-                    self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                    self.logger.validation_result(
+                        val_reward,
+                        self.best_val_reward,
+                        improved,
+                        loss=self.stats.metrics.validation_loss,
+                        best_loss=self.stats.metrics.best_validation_loss
+                    )
                     self.logger.validation_complete()
 
             # Auto-save check
@@ -700,14 +713,15 @@ class HFDatasetTrainer:
                     self.logger.checkpoint_save(ckpt_name)
                 self.brain.save_checkpoint(str(ckpt_path))
 
-            # Update stats
-            brain_stats = self.brain.get_stats()
-            self.stats.update(
-                cycles=brain_stats['cycles'],
-                tokens=brain_stats['tokens'],
-                loss=brain_stats['loss'],
-                vocab_size=brain_stats['vocab_words']
-            )
+        # Update stats
+        brain_stats = self.brain.get_stats()
+        self.stats.update(
+            cycles=brain_stats['cycles'],
+            tokens=brain_stats['tokens'],
+            loss=brain_stats['loss'],
+            reward=brain_stats['reward'],
+            vocab_size=brain_stats['vocab_words']
+        )
 
         # Run pipelined training
         pass_tokens = trainer.train_texts(iter(texts), progress_callback)
@@ -716,10 +730,16 @@ class HFDatasetTrainer:
         if enable_validation and self.val_samples and self.validate_per_pass:
             if verbose:
                 self.logger.validation_start(len(self.val_samples))
-            val_loss = self._run_validation()
+            val_reward = self._run_validation()
             if verbose:
                 improved = (self.validations_without_improvement == 0)
-                self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                self.logger.validation_result(
+                    val_reward,
+                    self.best_val_reward,
+                    improved,
+                    loss=self.stats.metrics.validation_loss,
+                    best_loss=self.stats.metrics.best_validation_loss
+                )
                 self.logger.validation_complete()
 
         # End deferred sync - execute all batched vocab syncs
@@ -774,7 +794,7 @@ class DatasetTrainer:
         # Validation state
         self.train_files: List[Path] = []
         self.val_files: List[Path] = []
-        self.best_val_loss = float('inf')
+        self.best_val_reward = float('-inf')
         self.validations_without_improvement = 0
 
         # Split files
@@ -808,7 +828,7 @@ class DatasetTrainer:
         Run validation on validation files.
 
         Returns:
-            Average validation loss
+            Average validation reward
         """
         if not self.val_files:
             return -1.0
@@ -816,15 +836,15 @@ class DatasetTrainer:
         # Defer GPU syncs during validation to avoid contention
         self.brain.begin_validation()
 
-        total_loss = 0.0
+        total_reward = 0.0
         count = 0
 
         for filepath in self.val_files:
             content = self.loader.load_file(filepath)
             if content:
-                loss = self.brain.validate_on_text(content)
-                if loss >= 0:
-                    total_loss += loss
+                reward = self.brain.validate_on_text(content)
+                if reward != -1.0:
+                    total_reward += reward
                     count += 1
 
         # Resume normal sync after validation
@@ -833,22 +853,24 @@ class DatasetTrainer:
         if count == 0:
             return -1.0
 
-        avg_loss = total_loss / count
+        avg_reward = total_reward / count
 
         # Update stats
-        self.stats.metrics.validation_loss = avg_loss
-        self.stats.metrics.validation_history.append((time.time(), avg_loss))
+        self.stats.metrics.validation_reward = avg_reward
+        self.stats.metrics.validation_loss = -avg_reward  # legacy compatibility
+        self.stats.metrics.validation_history.append((time.time(), avg_reward))
 
         # Check for improvement
-        if avg_loss < self.best_val_loss:
-            self.best_val_loss = avg_loss
-            self.stats.metrics.best_validation_loss = avg_loss
+        if avg_reward > self.best_val_reward:
+            self.best_val_reward = avg_reward
+            self.stats.metrics.best_validation_reward = avg_reward
+            self.stats.metrics.best_validation_loss = -avg_reward
             self.validations_without_improvement = 0
         else:
             self.validations_without_improvement += 1
             self.stats.metrics.validations_without_improvement = self.validations_without_improvement
 
-        return avg_loss
+        return avg_reward
 
     def train(self,
               passes: int = 1,
@@ -964,11 +986,14 @@ class DatasetTrainer:
                         cycles=brain_stats['cycles'],
                         tokens=brain_stats['tokens'],
                         loss=brain_stats['loss'],
+                        reward=brain_stats['reward'],
                         vocab_size=brain_stats['vocab_words']
                     )
 
                     if verbose:
-                        self.logger.file_end(processed, file_time, brain_stats['loss'], brain_stats['vocab_words'])
+                        self.logger.file_end(
+                            processed, file_time, brain_stats['reward'], brain_stats['vocab_words'], loss=brain_stats['loss']
+                        )
 
                     # Validation check (only if validate_per_pass is False)
                     if (enable_validation and self.val_files and
@@ -976,10 +1001,16 @@ class DatasetTrainer:
                         file_idx % self.validation_frequency == 0):
                         if verbose:
                             self.logger.validation_start(len(self.val_files))
-                        val_loss = self._run_validation()
+                        val_reward = self._run_validation()
                         if verbose:
                             improved = (self.validations_without_improvement == 0)
-                            self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                            self.logger.validation_result(
+                                val_reward,
+                                self.best_val_reward,
+                                improved,
+                                loss=self.stats.metrics.validation_loss,
+                                best_loss=self.stats.metrics.best_validation_loss
+                            )
                             self.logger.validation_complete()
 
                         # Early stopping check
@@ -1003,10 +1034,16 @@ class DatasetTrainer:
                 if enable_validation and self.val_files and self.validate_per_pass and not early_stopped:
                     if verbose:
                         self.logger.validation_start(len(self.val_files))
-                    val_loss = self._run_validation()
+                    val_reward = self._run_validation()
                     if verbose:
                         improved = (self.validations_without_improvement == 0)
-                        self.logger.validation_result(val_loss, self.best_val_loss, improved)
+                        self.logger.validation_result(
+                            val_reward,
+                            self.best_val_reward,
+                            improved,
+                            loss=self.stats.metrics.validation_loss,
+                            best_loss=self.stats.metrics.best_validation_loss
+                        )
                         self.logger.validation_complete()
 
                     # Early stopping check
@@ -1034,8 +1071,10 @@ class DatasetTrainer:
         final_stats = self.stats.get_summary()
 
         # Add validation stats
+        final_stats['validation_reward'] = self.stats.metrics.validation_reward
+        final_stats['best_validation_reward'] = self.best_val_reward
         final_stats['validation_loss'] = self.stats.metrics.validation_loss
-        final_stats['best_validation_loss'] = self.best_val_loss
+        final_stats['best_validation_loss'] = self.stats.metrics.best_validation_loss
         final_stats['early_stopped'] = early_stopped
 
         if verbose:
@@ -1043,11 +1082,14 @@ class DatasetTrainer:
                 'files': files_processed,
                 'tokens': total_tokens,
                 'loss': final_stats['loss'],
+                'reward': final_stats.get('reward', 0.0),
                 'vocab': final_stats['vocab_size']
             }
             if self.val_files:
+                end_kwargs['validation_reward'] = self.stats.metrics.validation_reward
+                end_kwargs['best_val_reward'] = self.best_val_reward
                 end_kwargs['validation_loss'] = self.stats.metrics.validation_loss
-                end_kwargs['best_val_loss'] = self.best_val_loss
+                end_kwargs['best_val_loss'] = self.stats.metrics.best_validation_loss
             if early_stopped:
                 end_kwargs['status'] = 'early_stopped'
 

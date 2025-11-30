@@ -216,9 +216,11 @@ class CUDACompiler:
         print(f"   Arch: {arch}")
 
         # Build command with temp file
+        include_dir = kernel_path.parent
         cmd = [
             nvcc,
             tmp_path,
+            '-I', str(include_dir),
             '-o', str(lib_path)
         ] + RUNTIME_CONFIG.NVCC_FLAGS + [f'-arch={arch}']
         
@@ -435,7 +437,14 @@ class VectLLMBrain:
     def _setup_api(self):
         """Setup function signatures per ctypes"""
         # set_model_config - MUST be called before init_system
-        self.lib.set_model_config.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.lib.set_model_config.argtypes = [
+            ctypes.c_int,  # num_layers
+            ctypes.c_int,  # embed_dim
+            ctypes.c_int,  # num_heads
+            ctypes.c_int,  # max_seq_len
+            ctypes.c_int,  # num_venn_heads
+            ctypes.c_int   # venn_clusters
+        ]
         self.lib.set_model_config.restype = None
 
         # init_system
@@ -610,7 +619,9 @@ class VectLLMBrain:
             MODEL_CONFIG.NUM_LAYERS,
             MODEL_CONFIG.EMBED_DIM,
             MODEL_CONFIG.NUM_HEADS,
-            MODEL_CONFIG.MAX_SEQ_LEN
+            MODEL_CONFIG.MAX_SEQ_LEN,
+            MODEL_CONFIG.NUM_VENN_HEADS,
+            MODEL_CONFIG.VENN_CLUSTERS
         )
 
         result = self.lib.init_system()
@@ -1416,15 +1427,23 @@ class VectLLMBrain:
             ctypes.byref(venn_reward)
         )
 
+        # Derive a loss-like value from reward for backward compatibility with
+        # existing training/logging codepaths that still expect a "loss" key.
+        # Higher reward => lower pseudo-loss.
+        reward_val = reward.value
+        pseudo_loss = -reward_val if reward_val != 0 else 0.0
+
         return {
             'cycles': cycles.value,
             'tokens': tokens.value,
             'temperature': temp.value,
             'momentum': momentum.value,
             # Reward-based metrics (higher = better)
-            'reward': reward.value,
+            'reward': reward_val,
             'topk_reward': topk_reward.value,
             'venn_reward': venn_reward.value,
+            # Legacy compatibility (loss expected by callers)
+            'loss': pseudo_loss,
             # Vocab stats
             'vocab_words': len(self.vocab.word_to_id),
             'vocab_utilization': len(self.vocab.word_to_id) / self.vocab.max_word_vocab_size,
